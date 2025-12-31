@@ -61,7 +61,7 @@ const Login: React.FC = () => {
             name="email"
             rules={[{ required: true, message: '请输入您的邮箱!' }]}
           >
-            <Input prefix={<UserOutlined className="site-form-item-icon" />} placeholder="邮箱" />
+            <Input prefix={<UserOutlined className="site-form-item-icon" />} placeholder="邮箱" style={{ fontSize: '14px' }} />
           </Form.Item>
           <Form.Item
             name="password"
@@ -71,6 +71,7 @@ const Login: React.FC = () => {
               prefix={<LockOutlined className="site-form-item-icon" />}
               type="password"
               placeholder="密码"
+              style={{ fontSize: '14px' }}
             />
           </Form.Item>
           

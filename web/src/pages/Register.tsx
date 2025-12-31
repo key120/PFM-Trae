@@ -35,11 +35,15 @@ const Register: React.FC = () => {
     }
 
     if (data.session) {
-      messageApi.success('注册成功，正在跳转...');
-      navigate('/dashboard');
+      // 注册成功且自动登录的情况下，先登出以确保跳转到登录页
+      await supabase.auth.signOut();
+      messageApi.success('注册成功，请登录', 1.5, () => {
+        navigate('/login');
+      });
     } else {
-      messageApi.success('注册成功，请检查您的邮箱进行验证！', 5);
-      // Optional: navigate to login or stay here
+      messageApi.success('注册成功，请检查您的邮箱进行验证！', 3, () => {
+        navigate('/login');
+      });
     }
   };
 
@@ -71,7 +75,7 @@ const Register: React.FC = () => {
               { required: true, message: '请输入您的邮箱!' },
             ]}
           >
-            <Input prefix={<UserOutlined />} placeholder="邮箱" />
+            <Input prefix={<UserOutlined />} placeholder="邮箱" style={{ fontSize: '14px' }} />
           </Form.Item>
 
           <Form.Item
@@ -82,7 +86,7 @@ const Register: React.FC = () => {
             ]}
             hasFeedback
           >
-            <Input.Password prefix={<LockOutlined />} placeholder="密码" />
+            <Input.Password prefix={<LockOutlined />} placeholder="密码" style={{ fontSize: '14px' }} />
           </Form.Item>
 
           <Form.Item
@@ -101,7 +105,7 @@ const Register: React.FC = () => {
               }),
             ]}
           >
-            <Input.Password prefix={<LockOutlined />} placeholder="确认密码" />
+            <Input.Password prefix={<LockOutlined />} placeholder="确认密码" style={{ fontSize: '14px' }} />
           </Form.Item>
 
           <Form.Item>
