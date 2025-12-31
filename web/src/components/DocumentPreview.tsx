@@ -247,6 +247,7 @@ const updatePageNumbers = (container: HTMLElement) => {
             });
             const firstVisible = Array.from(page.children).find((c) => getComputedStyle(c as HTMLElement).display !== 'none' && c.tagName !== 'HEADER' && c.tagName !== 'FOOTER') as HTMLElement | undefined;
             // 首页内容保持原有布局，不强制清除 marginTop
+            if (firstVisible) { /* unused */ }
             // if (firstVisible) firstVisible.style.marginTop = '0px';
             return;
         }
@@ -350,9 +351,9 @@ const paginateDocument = (container: HTMLElement) => {
       if (!t) return false;
       return /^目\s*录$/.test(t) || /^Table of Contents$/i.test(t) || /^Contents$/i.test(t) || /^目錄$/.test(t);
     };
-    const isTocContainer = (el: HTMLElement) => {
-      return !!el.querySelector('.docx-tab-stop') || !!el.querySelector('a[href^=\"#_Toc\"]') || !!el.querySelector('[id^=\"_Toc\"],[name^=\"_Toc\"]');
-    };
+    // const isTocContainer = (el: HTMLElement) => {
+    //   return !!el.querySelector('.docx-tab-stop') || !!el.querySelector('a[href^=\"#_Toc\"]') || !!el.querySelector('[id^=\"_Toc\"],[name^=\"_Toc\"]');
+    // };
     const walker = document.createTreeWalker(page, NodeFilter.SHOW_ELEMENT, null);
     let tocEl: HTMLElement | null = null;
     {
@@ -481,7 +482,7 @@ const repaginateFromScratch = (container: HTMLElement) => {
   const pages = Array.from(container.querySelectorAll('.docx')) as HTMLElement[];
   if (pages.length === 0) return;
   const first = pages[0];
-  const header = Array.from(first.children).find(c => c.tagName === 'HEADER') as HTMLElement | undefined;
+  // const header = Array.from(first.children).find(c => c.tagName === 'HEADER') as HTMLElement | undefined;
   const footer = Array.from(first.children).find(c => c.tagName === 'FOOTER') as HTMLElement | undefined;
   const getContentChildren = (page: HTMLElement) => {
     const h = Array.from(page.children).find(c => c.tagName === 'HEADER') as HTMLElement | undefined;

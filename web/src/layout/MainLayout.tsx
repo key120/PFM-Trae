@@ -1,6 +1,6 @@
 import React from 'react';
 import { Outlet, useNavigate } from 'react-router-dom';
-import { Layout, Dropdown, Space, Avatar, Typography } from 'antd';
+import { Layout, Dropdown, Avatar, Typography } from 'antd';
 import { UserOutlined, LogoutOutlined } from '@ant-design/icons';
 import type { MenuProps } from 'antd';
 import { useAuthStore } from '../store/useAuthStore';

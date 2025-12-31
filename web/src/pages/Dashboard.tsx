@@ -1,6 +1,5 @@
 import React, { useEffect } from 'react';
 import { Card, Button, message } from 'antd';
-import { DownloadOutlined, ExportOutlined } from '@ant-design/icons';
 import UploadZone from '../components/UploadZone';
 import DocumentPreview from '../components/DocumentPreview';
 import TableOfContents from '../components/TableOfContents';

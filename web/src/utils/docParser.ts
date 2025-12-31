@@ -106,7 +106,7 @@ export const parseDocumentHeadings = async (file: File): Promise<HeadingNode[]> 
       // 特殊处理：如果标题本身不包含章节号，但我们知道它应该有（比如 "功能介绍" -> "第2章. 功能介绍"）
       // 上面的映射已经处理了这种情况。
       
-      const originalTitle = title;
+      // const originalTitle = title;
       
       // 去除标题开头可能存在的自动序号（如 "1. ", "1.1 ", "1、" 等）
       // 匹配模式：数字开头，可能包含点或顿号，最后以空白字符结束
