@@ -1,6 +1,7 @@
 import { create } from 'zustand';
 import { Session, User } from '@supabase/supabase-js';
 import { supabase } from '../lib/supabase';
+import { useDocStore } from './useDocStore';
 
 interface AuthState {
   user: User | null;
@@ -11,6 +12,8 @@ interface AuthState {
   signOut: () => Promise<void>;
 }
 
+let lastUserId: string | null = null;
+
 export const useAuthStore = create<AuthState>((set, get) => ({
   user: null,
   session: null,
@@ -19,17 +22,27 @@ export const useAuthStore = create<AuthState>((set, get) => ({
   initialize: async () => {
     if (get().initialized) return;
     
-    // Get initial session
     const { data: { session } } = await supabase.auth.getSession();
-    set({ session, user: session?.user ?? null, loading: false, initialized: true });
+    const user = session?.user ?? null;
+    if (user?.id !== lastUserId) {
+      useDocStore.getState().reset();
+      lastUserId = user?.id ?? null;
+    }
+    set({ session, user, loading: false, initialized: true });
 
-    // Listen for changes
     supabase.auth.onAuthStateChange((_event, session) => {
-      set({ session, user: session?.user ?? null, loading: false });
+      const nextUser = session?.user ?? null;
+      if (nextUser?.id !== lastUserId) {
+        useDocStore.getState().reset();
+        lastUserId = nextUser?.id ?? null;
+      }
+      set({ session, user: nextUser ?? null, loading: false });
     });
   },
   signOut: async () => {
     await supabase.auth.signOut();
+    useDocStore.getState().reset();
+    lastUserId = null;
     set({ session: null, user: null });
   },
 }));

@@ -3,43 +3,29 @@ import { HeadingNode } from './docParser';
 import { saveAs } from 'file-saver';
 import { calculateNumbering } from './numbering';
 
-/**
- * 导出经过筛选的文档
- * @param file 原始 DOCX 文件
- * @param selectedKeys 选中的标题 Key 列表
- * @param flatHeadings 扁平化的标题节点列表（按文档顺序）
- * @param rootHeadings 原始树形结构（用于计算序号）
- */
-export const exportDocument = async (
+interface PreparedExport {
+  zip: JSZip;
+  fileName: string;
+}
+
+const prepareExport = async (
   file: File,
   selectedKeys: string[],
   flatHeadings: HeadingNode[],
   rootHeadings: HeadingNode[]
-): Promise<void> => {
-  // 1. 加载 ZIP
+): Promise<PreparedExport> => {
   const zip = await JSZip.loadAsync(file);
-  
-  // 2. 读取关键文件
   const documentXmlStr = await zip.file('word/document.xml')?.async('string');
   const stylesXmlStr = await zip.file('word/styles.xml')?.async('string');
-  
   if (!documentXmlStr || !stylesXmlStr) {
     throw new Error('Invalid DOCX file: missing document.xml or styles.xml');
   }
-
-  // 3. 解析 XML
   const parser = new DOMParser();
   const docDom = parser.parseFromString(documentXmlStr, 'application/xml');
   const stylesDom = parser.parseFromString(stylesXmlStr, 'application/xml');
-
-  // 4. 构建样式映射表 (StyleId -> HeadingLevel)
   const styleMap = buildStyleMap(stylesDom);
-
-  // 5. 预处理：构建父子关系并扩充选中集合
-  // 如果子节点被选中，父节点也必须被保留
   const parentMap = new Map<string, string>();
   const stack: HeadingNode[] = [];
-
   for (const node of flatHeadings) {
     while (stack.length > 0 && stack[stack.length - 1].level >= node.level) {
       stack.pop();
@@ -49,9 +35,7 @@ export const exportDocument = async (
     }
     stack.push(node);
   }
-
   const effectiveSelectedSet = new Set(selectedKeys);
-  // 遍历所有被显式选中的 key，将其所有祖先加入集合
   for (const key of selectedKeys) {
     let current = key;
     while (parentMap.has(current)) {
@@ -61,69 +45,65 @@ export const exportDocument = async (
       current = parent;
     }
   }
-
-  // 计算新序号 Map
-  // 注意：这里我们传入 effectiveSelectedSet，确保半选状态的父节点也能获得序号
   const numberingMap = calculateNumbering(rootHeadings, Array.from(effectiveSelectedSet));
-
-  // 6. 遍历并过滤节点
   const body = docDom.getElementsByTagName('w:body')[0];
   if (!body) {
     throw new Error('Invalid DOCX: no body found');
   }
-
-  // 子节点列表转换为数组
   const children = Array.from(body.childNodes);
-  
   let currentHeadingIndex = 0;
-  let shouldKeep = true; 
-
+  let shouldKeep = true;
   for (const child of children) {
     if (child.nodeName === 'w:p') {
       const level = getHeadingLevel(child as Element, styleMap);
-      
       if (level !== null) {
-        // 这是一个标题段落
         if (currentHeadingIndex < flatHeadings.length) {
           const headingNode = flatHeadings[currentHeadingIndex];
-          
-          // 检查是否匹配 (使用扩充后的集合)
           const isSelected = effectiveSelectedSet.has(headingNode.key);
           shouldKeep = isSelected;
-          
           if (isSelected) {
-            // 如果保留，应用新的序号
             const newNumber = numberingMap.get(headingNode.key);
             if (newNumber) {
-               applyNewNumbering(child as Element, newNumber, headingNode.title);
+              applyNewNumbering(child as Element, newNumber, headingNode.title);
             }
           }
-
           currentHeadingIndex++;
-        } else {
-          // 超出了范围
         }
       }
     }
-    
-    // 如果决定不保留，则移除节点
     if (!shouldKeep) {
       body.removeChild(child);
     }
   }
-
-  // 7. 更新 TOC 设置
   await updateSettingsForToc(zip);
-
-  // 8. 序列化并打包
   const serializer = new XMLSerializer();
   const newDocumentXml = serializer.serializeToString(docDom);
   zip.file('word/document.xml', newDocumentXml);
+  const base = file.name.endsWith('.docx') ? file.name.slice(0, -5) : file.name;
+  const fileName = `${base}_exported.docx`;
+  return { zip, fileName };
+};
 
-  // 9. 生成并下载
+export const exportDocument = async (
+  file: File,
+  selectedKeys: string[],
+  flatHeadings: HeadingNode[],
+  rootHeadings: HeadingNode[]
+): Promise<void> => {
+  const { zip, fileName } = await prepareExport(file, selectedKeys, flatHeadings, rootHeadings);
   const blob = await zip.generateAsync({ type: 'blob' });
-  const newFileName = file.name.replace('.docx', '_exported.docx');
-  saveAs(blob, newFileName);
+  saveAs(blob, fileName);
+};
+
+export const exportDocumentToBlob = async (
+  file: File,
+  selectedKeys: string[],
+  flatHeadings: HeadingNode[],
+  rootHeadings: HeadingNode[]
+): Promise<Blob> => {
+  const { zip } = await prepareExport(file, selectedKeys, flatHeadings, rootHeadings);
+  const blob = await zip.generateAsync({ type: 'blob' });
+  return blob;
 };
 
 /**

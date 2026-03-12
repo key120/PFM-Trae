@@ -48,16 +48,17 @@ create trigger on_auth_user_created
   for each row execute procedure public.handle_new_user();
 
 -- 3. Create a table for documents (metadata)
-create table public.documents (
+create table if not exists public.documents (
   id uuid default uuid_generate_v4() primary key,
-  user_id uuid references auth.users(id) not null,
-  name text not null,
-  size bigint not null,
-  type text not null,
-  path text not null, -- Storage path
-  metadata jsonb, -- Store parsed headings structure here if needed
+  owner_id uuid references auth.users(id) not null,
+  encrypted_title text,
+  size bigint,
+  type text,
+  path text,
+  metadata jsonb,
   created_at timestamp with time zone default timezone('utc'::text, now()) not null,
-  updated_at timestamp with time zone default timezone('utc'::text, now()) not null
+  updated_at timestamp with time zone default timezone('utc'::text, now()) not null,
+  deleted_at timestamp with time zone
 );
 
 -- Enable RLS for documents
@@ -66,19 +67,19 @@ alter table public.documents enable row level security;
 -- Create policies for documents
 create policy "Users can view their own documents."
   on public.documents for select
-  using ( auth.uid() = user_id );
+  using ( auth.uid() = owner_id );
 
 create policy "Users can insert their own documents."
   on public.documents for insert
-  with check ( auth.uid() = user_id );
+  with check ( auth.uid() = owner_id );
 
 create policy "Users can update their own documents."
   on public.documents for update
-  using ( auth.uid() = user_id );
+  using ( auth.uid() = owner_id );
 
 create policy "Users can delete their own documents."
   on public.documents for delete
-  using ( auth.uid() = user_id );
+  using ( auth.uid() = owner_id );
 
 -- 4. Storage Policies (Assuming a bucket named 'documents' is created via Dashboard)
 -- You need to create a bucket named 'documents' in the Supabase Dashboard -> Storage first.
