@@ -132,6 +132,7 @@ describe('savePersonalDocument', () => {
     expect(insertArg.metadata.versions[0].remark).toBe('第一次保存');
     expect(insertArg.metadata.versions[0].author).toBe('tester@example.com');
     expect(insertArg.metadata.selectedKeys).toEqual(['k1', 'k2']);
+    expect((insertArg.metadata as any).encryption).toEqual({ enabled: true, version: 1 });
     expect(result.documentId).toBe('doc-1');
   });
 
@@ -200,6 +201,7 @@ describe('savePersonalDocument', () => {
     expect(Array.isArray(updateArg.metadata.versions)).toBe(true);
     expect(updateArg.metadata.versions.length).toBeGreaterThanOrEqual(1);
     expect(updateArg.metadata.selectedKeys).toEqual(['k3']);
+    expect((updateArg.metadata as any).encryption).toEqual({ enabled: true, version: 1 });
     const eqCalls = updateBuilder.eq.mock.calls as [string, string][];
     expect(eqCalls[0]).toEqual(['id', 'doc-2']);
     expect(eqCalls[1]).toEqual(['owner_id', 'user-2']);
@@ -228,6 +230,10 @@ describe('fetchPersonalDocuments', () => {
             latestVersion: 'V1.0.0',
             latestRemark: '第一次保存',
             versions: [],
+            encryption: {
+              enabled: true,
+              version: 1,
+            },
           },
         },
         {

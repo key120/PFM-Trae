@@ -23,6 +23,10 @@ interface DocumentMetadata {
   latestRemark?: string | null;
   versions?: VersionInfo[];
   selectedKeys?: string[];
+  encryption?: {
+    enabled: boolean;
+    version: number;
+  };
 }
 
 interface DocumentsRow {
@@ -71,9 +75,14 @@ export async function fetchPersonalDocuments(userId: string): Promise<PersonalDo
     return [];
   }
 
-  const rows = (data as DocumentsRow[]).filter(
-    (row) => !row.path || !row.path.startsWith('r2://dummy'),
-  );
+  const rows = (data as DocumentsRow[]).filter((row) => {
+    if (row.path && row.path.startsWith('r2://dummy')) {
+      return false;
+    }
+    const meta = (row.metadata as DocumentMetadata | null) ?? null;
+    const encryption = meta?.encryption;
+    return !!encryption?.enabled;
+  });
 
   if (rows.length === 0) {
     return [];
@@ -140,6 +149,7 @@ export async function savePersonalDocument(
       latestRemark: input.remark,
       versions: [versionEntry],
       selectedKeys: input.selectedKeys,
+      encryption: { enabled: true, version: 1 },
     };
     const { data, error } = await supabase
       .from('documents')
@@ -184,6 +194,7 @@ export async function savePersonalDocument(
     latestRemark: input.remark,
     versions: [versionEntry, ...existingVersions],
     selectedKeys: input.selectedKeys,
+    encryption: { enabled: true, version: 1 },
   };
 
   const { data, error } = await supabase
