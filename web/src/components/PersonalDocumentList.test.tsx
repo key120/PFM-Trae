@@ -209,4 +209,55 @@ describe('PersonalDocumentList', () => {
     expect(setCurrentDocumentVersion).toHaveBeenCalledWith('V1.0.3');
     expect(setInitialCheckedKeys).toHaveBeenCalledWith(['k1', 'k2']);
   });
+
+  it('版本下拉条目中展示版本大小', async () => {
+    const user = userEvent.setup();
+    const loader = vi.fn().mockResolvedValue([
+      {
+        id: 'doc-1',
+        name: '测试文档',
+        size: 2048,
+        createdAt: '2025-01-01T00:00:00Z',
+        updatedAt: '2025-01-02T00:00:00Z',
+        version: 'V1.1.0',
+        remark: '第二次',
+        versions: [
+          {
+            version: 'V1.1.0',
+            remark: '第二次',
+            author: 'tester@example.com',
+            createdAt: '2025-01-02T00:00:00Z',
+            sizeBytes: 2048,
+          },
+          {
+            version: 'V1.0.0',
+            remark: '第一次',
+            author: 'tester@example.com',
+            createdAt: '2025-01-01T00:00:00Z',
+            sizeBytes: 1024,
+          },
+        ],
+      },
+    ]);
+
+    render(<PersonalDocumentList open loader={loader} />);
+
+    await waitFor(() => {
+      expect(screen.getByText('测试文档')).toBeTruthy();
+    });
+
+    // 点击版本号展开下拉
+    await user.click(screen.getByText(/版本号：V1\.1\.0/));
+
+    await waitFor(() => {
+      expect(screen.getByText('最新')).toBeTruthy();
+    });
+
+    // 两个版本的大小均应显示（下拉中）
+    const sizes = screen.getAllByText(/大小：/);
+    // sizes[0] 是卡片本身的大小，sizes[1] 和 sizes[2] 是下拉中两个版本的大小
+    const sizeTexts = sizes.map((el) => el.textContent ?? '');
+    expect(sizeTexts.some((t) => t.includes('2.0 KB'))).toBe(true);
+    expect(sizeTexts.some((t) => t.includes('1.0 KB'))).toBe(true);
+  });
 });

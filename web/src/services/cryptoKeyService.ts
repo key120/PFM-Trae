@@ -10,8 +10,26 @@ type StoredKeyPair = {
   privateKey: CryptoKey;
 };
 
-const isWebCryptoAvailable = () => {
+export const isWebCryptoAvailable = () => {
   return typeof crypto !== 'undefined' && !!crypto.subtle && typeof indexedDB !== 'undefined';
+};
+
+export type DocumentEncryptionStatus = {
+  isEncrypted: boolean;
+  encryptionVersion: number | null;
+};
+
+export const getDocumentEncryptionStatus = (metadata: {
+  encryption?: { enabled?: boolean; version?: number } | null;
+} | null | undefined): DocumentEncryptionStatus => {
+  const encryption = metadata?.encryption;
+  if (!encryption?.enabled) {
+    return { isEncrypted: false, encryptionVersion: null };
+  }
+  return {
+    isEncrypted: true,
+    encryptionVersion: typeof encryption.version === 'number' ? encryption.version : null,
+  };
 };
 
 const openDb = (): Promise<IDBDatabase> => {
@@ -253,4 +271,175 @@ export const getDocumentKeyRotationDecision = (
     reason: null,
     nextVersion: currentVersion,
   };
+};
+
+export const generateDocumentKey = async (): Promise<DocumentKey> => {
+  if (!isWebCryptoAvailable()) {
+    throw new Error('WebCrypto is not available');
+  }
+
+  const key = await crypto.subtle.generateKey(
+    {
+      name: 'AES-GCM',
+      length: 256,
+    },
+    true,
+    ['encrypt', 'decrypt'],
+  );
+
+  return key;
+};
+
+export const wrapDocumentKey = async (
+  documentKey: DocumentKey,
+  userPublicKey: CryptoKey,
+): Promise<string> => {
+  if (!isWebCryptoAvailable()) {
+    throw new Error('WebCrypto is not available');
+  }
+
+  const exportedKey = await crypto.subtle.exportKey('raw', documentKey);
+  const wrappedKey = await crypto.subtle.encrypt(
+    {
+      name: 'RSA-OAEP',
+    },
+    userPublicKey,
+    exportedKey,
+  );
+
+  const wrappedBytes = new Uint8Array(wrappedKey);
+  let binary = '';
+  for (let i = 0; i < wrappedBytes.length; i++) {
+    binary += String.fromCharCode(wrappedBytes[i] ?? 0);
+  }
+  return btoa(binary);
+};
+
+export const unwrapDocumentKey = async (
+  wrappedKeyBase64: string,
+  userPrivateKey: CryptoKey,
+): Promise<DocumentKey> => {
+  if (!isWebCryptoAvailable()) {
+    throw new Error('WebCrypto is not available');
+  }
+
+  const binary = atob(wrappedKeyBase64);
+  const wrappedBytes = new Uint8Array(binary.length);
+  for (let i = 0; i < binary.length; i++) {
+    wrappedBytes[i] = binary.charCodeAt(i);
+  }
+
+  const unwrappedKey = await crypto.subtle.decrypt(
+    {
+      name: 'RSA-OAEP',
+    },
+    userPrivateKey,
+    wrappedBytes,
+  );
+
+  const documentKey = await crypto.subtle.importKey(
+    'raw',
+    unwrappedKey,
+    {
+      name: 'AES-GCM',
+      length: 256,
+    },
+    true,
+    ['encrypt', 'decrypt'],
+  );
+
+  return documentKey;
+};
+
+export const getUserKeyPair = async (userId: string): Promise<UserKeyPair | null> => {
+  return getStoredKeyPair(userId);
+};
+
+/**
+ * 查询目标用户的 RSA 公钥（从 profiles 表）。
+ * 共享文档时用对方公钥封装 DocumentKey，确保只有对方私钥能解开。
+ */
+export const getTargetUserPublicKey = async (targetUserId: string): Promise<CryptoKey | null> => {
+  const { data, error } = await supabase
+    .from('profiles')
+    .select('public_key')
+    .eq('id', targetUserId)
+    .single();
+
+  if (error || !data?.public_key) {
+    return null;
+  }
+
+  try {
+    const jwk = data.public_key as JsonWebKey;
+    const publicKey = await crypto.subtle.importKey(
+      'jwk',
+      jwk,
+      { name: 'RSA-OAEP', hash: 'SHA-256' },
+      true,
+      ['encrypt'],
+    );
+    return publicKey;
+  } catch {
+    return null;
+  }
+};
+
+/**
+ * 将文档密钥分发给目标用户：
+ * 用目标用户的公钥封装当前文档的 DocumentKey，写入 document_keys 表。
+ * - 调用前需先通过 unwrapDocumentKey 拿到明文 DocumentKey（调用者自己的私钥解开）
+ * - 适用场景：文档所有者共享文档给成员时调用
+ */
+export const distributeDocumentKey = async (
+  documentId: string,
+  documentKey: DocumentKey,
+  targetUserId: string,
+  keyVersion: number = 1,
+): Promise<void> => {
+  if (!isWebCryptoAvailable()) {
+    throw new Error('WebCrypto is not available');
+  }
+
+  const targetPublicKey = await getTargetUserPublicKey(targetUserId);
+  if (!targetPublicKey) {
+    throw new Error(`无法获取用户 ${targetUserId} 的公钥，该用户可能未完成密钥初始化`);
+  }
+
+  const wrappedDocumentKey = await wrapDocumentKey(documentKey, targetPublicKey);
+
+  const { error } = await supabase.from('document_keys').upsert(
+    {
+      document_id: documentId,
+      user_id: targetUserId,
+      wrapped_document_key: wrappedDocumentKey,
+      key_version: keyVersion,
+    },
+    { onConflict: 'document_id,user_id,key_version' },
+  );
+
+  if (error) {
+    throw error;
+  }
+};
+
+/**
+ * 撤销目标用户对文档的解密权限：
+ * 从 document_keys 表删除目标用户的所有 wrapped_document_key 记录。
+ * - 调用后目标用户无法再获取 wrapped key，配合 RLS 确保即时生效
+ * - 注意：已下载到本地的密文无法追回，撤销只阻止后续获取密钥
+ */
+export const revokeDocumentKeyAccess = async (
+  documentId: string,
+  targetUserId: string,
+): Promise<void> => {
+  const { error } = await supabase
+    .from('document_keys')
+    .delete()
+    .eq('document_id', documentId)
+    .eq('user_id', targetUserId);
+
+  if (error) {
+    throw error;
+  }
 };

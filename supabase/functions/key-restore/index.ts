@@ -5,18 +5,28 @@ import { decryptWithMasterKey } from "../_shared/masterKeyUtils.ts";
 
 declare const Deno: any;
 
+const corsHeaders = {
+  "Access-Control-Allow-Origin": "*",
+  "Access-Control-Allow-Headers": "authorization, x-client-info, apikey, content-type",
+  "Access-Control-Allow-Methods": "POST, OPTIONS",
+};
+
 type KeyRestoreRequest = {
   keyVersion?: number;
 };
 
 Deno.serve(async (req: Request) => {
+  if (req.method === "OPTIONS") {
+    return new Response(null, { status: 204, headers: corsHeaders });
+  }
+
   if (req.method !== "POST") {
-    return new Response("Method Not Allowed", { status: 405 });
+    return new Response("Method Not Allowed", { status: 405, headers: corsHeaders });
   }
 
   const authHeader = req.headers.get("Authorization") ?? "";
   if (!authHeader.startsWith("Bearer ")) {
-    return new Response("Unauthorized", { status: 401 });
+    return new Response("Unauthorized", { status: 401, headers: corsHeaders });
   }
 
   const supabaseUrl = Deno.env.get("SUPABASE_URL");
@@ -24,7 +34,7 @@ Deno.serve(async (req: Request) => {
   const supabaseAnonKey = Deno.env.get("SUPABASE_ANON_KEY");
 
   if (!supabaseUrl || !supabaseAnonKey || !supabaseServiceKey) {
-    return new Response("Supabase config missing", { status: 500 });
+    return new Response("Supabase config missing", { status: 500, headers: corsHeaders });
   }
 
   const userClient = createClient(supabaseUrl, supabaseAnonKey, {
@@ -33,7 +43,7 @@ Deno.serve(async (req: Request) => {
 
   const { data: userData, error: userError } = await userClient.auth.getUser();
   if (userError || !userData?.user) {
-    return new Response("Unauthorized", { status: 401 });
+    return new Response("Unauthorized", { status: 401, headers: corsHeaders });
   }
   const userId = userData.user.id;
 
@@ -71,7 +81,7 @@ Deno.serve(async (req: Request) => {
         ip,
       });
     } catch { /* ignore */ }
-    return new Response("Backup not found", { status: 404 });
+    return new Response("Backup not found", { status: 404, headers: corsHeaders });
   }
 
   let privateKeyJwk: JsonWebKey;
@@ -90,7 +100,7 @@ Deno.serve(async (req: Request) => {
         ip,
       });
     } catch { /* ignore */ }
-    return new Response("Decryption failed", { status: 500 });
+    return new Response("Decryption failed", { status: 500, headers: corsHeaders });
   }
 
   try {
@@ -108,6 +118,6 @@ Deno.serve(async (req: Request) => {
       keyVersion: backupData.key_version,
       backedUpAt: backupData.created_at,
     }),
-    { status: 200, headers: { "Content-Type": "application/json" } }
+    { status: 200, headers: { ...corsHeaders, "Content-Type": "application/json" } }
   );
 });

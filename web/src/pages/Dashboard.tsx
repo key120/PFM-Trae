@@ -1,5 +1,5 @@
 import React, { useEffect } from 'react';
-import { Card, Button, message, Space } from 'antd';
+import { Card, Button, message, Space, Tooltip } from 'antd';
 import UploadZone from '../components/UploadZone';
 import DocumentPreview from '../components/DocumentPreview';
 import TableOfContents from '../components/TableOfContents';
@@ -9,6 +9,7 @@ import { parseDocumentHeadings, HeadingNode, getAllKeys, flattenHeadings } from 
 import { exportDocument } from '../utils/documentExporter';
 import SaveDocumentModal from '../components/SaveDocumentModal';
 import { savePersonalDocument } from '../services/documentService';
+import { isWebCryptoAvailable } from '../services/cryptoKeyService';
 
 const Dashboard: React.FC = () => {
   const { user } = useAuthStore();
@@ -28,6 +29,7 @@ const Dashboard: React.FC = () => {
   } = useDocStore();
   const [exporting, setExporting] = React.useState(false);
   const [saving, setSaving] = React.useState(false);
+  const webCryptoAvailable = isWebCryptoAvailable();
   const [saveModalOpen, setSaveModalOpen] = React.useState(false);
 
   // 当 currentFile 改变时，解析目录
@@ -222,13 +224,18 @@ const Dashboard: React.FC = () => {
         extra={
           currentFile ? (
             <Space size={8}>
-              <Button
-                type="default"
-                loading={saving}
-                onClick={handleOpenSaveModal}
+              <Tooltip
+                title={!webCryptoAvailable ? '当前浏览器不支持加密功能，无法保存文档' : undefined}
               >
-                保存
-              </Button>
+                <Button
+                  type="default"
+                  loading={saving}
+                  disabled={!webCryptoAvailable}
+                  onClick={handleOpenSaveModal}
+                >
+                  保存
+                </Button>
+              </Tooltip>
 
               <Button 
                 type="primary" 

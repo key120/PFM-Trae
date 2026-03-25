@@ -2,6 +2,8 @@ import { describe, expect, it, vi, beforeEach } from 'vitest';
 import {
   getDocumentKeyRotationDecision,
   getNextDocumentKeyVersion,
+  isWebCryptoAvailable,
+  getDocumentEncryptionStatus,
 } from './cryptoKeyService';
 
 // vi.mock 必须在顶层（会被 hoisted）
@@ -110,5 +112,51 @@ describe('restoreUserPrivateKey', () => {
 
     const result = await restoreUserPrivateKey(fakeUser);
     expect(result).toBeNull();
+  });
+});
+
+describe('isWebCryptoAvailable', () => {
+  it('返回布尔值，反映当前环境的 WebCrypto 与 IndexedDB 支持情况', () => {
+    const result = isWebCryptoAvailable();
+    expect(typeof result).toBe('boolean');
+    // encryptionService.test.ts 中的加解密测试依赖 WebCrypto，说明 crypto.subtle 存在
+    // isWebCryptoAvailable 要求同时满足 WebCrypto + IndexedDB，后者在 jsdom 中不可用
+    const expectedValue =
+      typeof crypto !== 'undefined' &&
+      !!crypto.subtle &&
+      typeof indexedDB !== 'undefined';
+    expect(result).toBe(expectedValue);
+  });
+});
+
+describe('getDocumentEncryptionStatus', () => {
+  it('metadata 为 null 时返回未加密', () => {
+    const status = getDocumentEncryptionStatus(null);
+    expect(status.isEncrypted).toBe(false);
+    expect(status.encryptionVersion).toBeNull();
+  });
+
+  it('encryption.enabled 为 false 时返回未加密', () => {
+    const status = getDocumentEncryptionStatus({ encryption: { enabled: false, version: 1 } });
+    expect(status.isEncrypted).toBe(false);
+    expect(status.encryptionVersion).toBeNull();
+  });
+
+  it('encryption.enabled 为 true 时返回已加密及版本号', () => {
+    const status = getDocumentEncryptionStatus({ encryption: { enabled: true, version: 2 } });
+    expect(status.isEncrypted).toBe(true);
+    expect(status.encryptionVersion).toBe(2);
+  });
+
+  it('encryption 字段缺失时返回未加密', () => {
+    const status = getDocumentEncryptionStatus({});
+    expect(status.isEncrypted).toBe(false);
+    expect(status.encryptionVersion).toBeNull();
+  });
+
+  it('encryption.version 非数字时 encryptionVersion 为 null', () => {
+    const status = getDocumentEncryptionStatus({ encryption: { enabled: true } });
+    expect(status.isEncrypted).toBe(true);
+    expect(status.encryptionVersion).toBeNull();
   });
 });

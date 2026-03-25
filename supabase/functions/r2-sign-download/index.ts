@@ -1,8 +1,15 @@
 import "jsr:@supabase/functions-js/edge-runtime.d.ts";
 // @ts-ignore Deno edge runtime import
 import { createClient } from "jsr:@supabase/supabase-js@2";
+import { presignR2Url } from "../_shared/r2Presign.ts";
 
 declare const Deno: any;
+
+const corsHeaders = {
+  "Access-Control-Allow-Origin": "*",
+  "Access-Control-Allow-Headers": "authorization, x-client-info, apikey, content-type",
+  "Access-Control-Allow-Methods": "POST, OPTIONS",
+};
 
 type SignDownloadRequest = {
   documentId?: string;
@@ -17,20 +24,24 @@ const buildR2KeyPrefix = (env: string, documentId: string, versionId: string) =>
 };
 
 Deno.serve(async (req: Request) => {
+  if (req.method === "OPTIONS") {
+    return new Response(null, { status: 204, headers: corsHeaders });
+  }
+
   if (req.method !== "POST") {
-    return new Response("Method Not Allowed", { status: 405 });
+    return new Response("Method Not Allowed", { status: 405, headers: corsHeaders });
   }
 
   const authHeader = req.headers.get("Authorization") ?? "";
   if (!authHeader.startsWith("Bearer ")) {
-    return new Response("Unauthorized", { status: 401 });
+    return new Response("Unauthorized", { status: 401, headers: corsHeaders });
   }
 
   const supabaseUrl = Deno.env.get("SUPABASE_URL");
   const supabaseAnonKey = Deno.env.get("SUPABASE_ANON_KEY");
 
   if (!supabaseUrl || !supabaseAnonKey) {
-    return new Response("Supabase config missing", { status: 500 });
+    return new Response("Supabase config missing", { status: 500, headers: corsHeaders });
   }
 
   const supabase = createClient(supabaseUrl, supabaseAnonKey, {
@@ -43,7 +54,7 @@ Deno.serve(async (req: Request) => {
 
   const { data: userData, error: userError } = await supabase.auth.getUser();
   if (userError || !userData || !userData.user) {
-    return new Response("Unauthorized", { status: 401 });
+    return new Response("Unauthorized", { status: 401, headers: corsHeaders });
   }
   const userId = userData.user.id;
 
@@ -51,21 +62,34 @@ Deno.serve(async (req: Request) => {
   try {
     body = await req.json();
   } catch {
-    return new Response("Invalid JSON", { status: 400 });
+    return new Response("Invalid JSON", { status: 400, headers: corsHeaders });
   }
 
   if (!body.documentId || !body.versionId) {
-    return new Response("Missing documentId or versionId", { status: 400 });
+    return new Response("Missing documentId or versionId", { status: 400, headers: corsHeaders });
   }
 
-  const env = Deno.env.get("ENV") ?? "dev";
-  const bucket = Deno.env.get("R2_BUCKET_NAME");
-  const endpoint = Deno.env.get("R2_S3_ENDPOINT");
+  // 权限校验：当前用户必须是文档 owner（或后续扩展为共享成员）
+  const { data: docData, error: docError } = await supabase
+    .from("documents")
+    .select("id, owner_id")
+    .eq("id", body.documentId)
+    .maybeSingle();
 
-  if (!bucket || !endpoint) {
-    return new Response("R2 config missing", { status: 500 });
+  if (docError) {
+    return new Response("Forbidden", { status: 403, headers: corsHeaders });
+  }
+  if (!docData) {
+    return new Response("Not Found", { status: 404, headers: corsHeaders });
   }
 
+  // 当前仅允许 owner 下载；后续接入共享成员时在此处扩展
+  const isOwner = (docData as { owner_id: string }).owner_id === userId;
+  if (!isOwner) {
+    return new Response("Forbidden", { status: 403, headers: corsHeaders });
+  }
+
+  // 从 document_versions 获取 r2_key（RLS 已限制仅 owner 可见）
   const { data, error } = await supabase
     .from("document_versions")
     .select("r2_key, document_id")
@@ -74,21 +98,33 @@ Deno.serve(async (req: Request) => {
     .single();
 
   if (error) {
-    return new Response("Forbidden", { status: 403 });
+    return new Response("Forbidden", { status: 403, headers: corsHeaders });
   }
 
   if (!data || !data.r2_key) {
-    return new Response("Not Found", { status: 404 });
+    return new Response("Not Found", { status: 404, headers: corsHeaders });
   }
 
+  const env = Deno.env.get("ENV") ?? "dev";
   const r2Key = String((data as { r2_key: string }).r2_key);
 
   const expectedPrefix = buildR2KeyPrefix(env, body.documentId, body.versionId);
   if (!r2Key.startsWith(expectedPrefix)) {
-    return new Response("Invalid r2Key", { status: 500 });
+    return new Response("Invalid r2Key", { status: 500, headers: corsHeaders });
   }
 
-  const url = `${endpoint.replace(/\/$/, "")}/${bucket}/${r2Key}`;
+  // 生成真实 SigV4 预签名 GET URL
+  let presignResult;
+  try {
+    presignResult = await presignR2Url({
+      method: "GET",
+      r2Key,
+      expiresInSeconds: 300,
+    });
+  } catch (e) {
+    const msg = e instanceof Error ? e.message : "Presign failed";
+    return new Response(msg, { status: 500, headers: corsHeaders });
+  }
 
   try {
     const ip =
@@ -109,16 +145,10 @@ Deno.serve(async (req: Request) => {
     // 审计失败不影响主流程
   }
 
-  const responsePayload = {
-    url,
-    method: "GET" as const,
-    expiresAt: new Date(Date.now() + 5 * 60 * 1000).toISOString(),
-    r2Key,
-  };
-
-  return new Response(JSON.stringify(responsePayload), {
+  return new Response(JSON.stringify(presignResult), {
     status: 200,
     headers: {
+      ...corsHeaders,
       "Content-Type": "application/json",
     },
   });

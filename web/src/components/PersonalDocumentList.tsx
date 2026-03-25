@@ -10,6 +10,24 @@ interface PersonalDocumentListProps {
   onLoaded?: () => void;
 }
 
+const formatDateTime = (value: string) => {
+  if (!value) return '—';
+  const date = new Date(value);
+  if (Number.isNaN(date.getTime())) return '—';
+  return date.toLocaleString();
+};
+
+const formatSize = (value: number | null | undefined) => {
+  if (value === null || value === undefined || value <= 0) return '—';
+  const kb = 1024;
+  const mb = kb * 1024;
+  const gb = mb * 1024;
+  if (value >= gb) return `${(value / gb).toFixed(1)} GB`;
+  if (value >= mb) return `${(value / mb).toFixed(1)} MB`;
+  if (value >= kb) return `${(value / kb).toFixed(1)} KB`;
+  return `${value} B`;
+};
+
 const PersonalDocumentList: React.FC<PersonalDocumentListProps> = ({ open, loader = fetchPersonalDocuments, onLoaded }) => {
   const { user } = useAuthStore();
   const { setFile, setCurrentDocumentId, setCurrentDocumentVersion, setInitialCheckedKeys } = useDocStore();
@@ -185,36 +203,6 @@ const PersonalDocumentList: React.FC<PersonalDocumentListProps> = ({ open, loade
         const dateTime = item.updatedAt || item.createdAt;
         const size = item.size;
 
-        const formatDateTime = (value: string) => {
-          if (!value) {
-            return '—';
-          }
-          const date = new Date(value);
-          if (Number.isNaN(date.getTime())) {
-            return '—';
-          }
-          return date.toLocaleString();
-        };
-
-        const formatSize = (value: number | null) => {
-          if (value === null || value <= 0) {
-            return '—';
-          }
-          const kb = 1024;
-          const mb = kb * 1024;
-          const gb = mb * 1024;
-          if (value >= gb) {
-            return `${(value / gb).toFixed(1)} GB`;
-          }
-          if (value >= mb) {
-            return `${(value / mb).toFixed(1)} MB`;
-          }
-          if (value >= kb) {
-            return `${(value / kb).toFixed(1)} KB`;
-          }
-          return `${value} B`;
-        };
-
         const versions = Array.isArray(item.versions) ? item.versions : [];
         const isShared = sharedDocumentIds.has(item.id);
 
@@ -266,6 +254,7 @@ const PersonalDocumentList: React.FC<PersonalDocumentListProps> = ({ open, loade
                               <div>备注：{v.remark || '—'}</div>
                               <div>作者：{v.author || author}</div>
                               <div>时间：{formatDateTime(v.createdAt)}</div>
+                              <div>大小：{formatSize(v.sizeBytes)}</div>
                             </div>
                           ),
                         })),

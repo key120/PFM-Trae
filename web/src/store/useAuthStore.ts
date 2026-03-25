@@ -2,6 +2,7 @@ import { create } from 'zustand';
 import { Session, User } from '@supabase/supabase-js';
 import { supabase } from '../lib/supabase';
 import { useDocStore } from './useDocStore';
+import { ensureUserKeyPair } from '../services/cryptoKeyService';
 
 interface AuthState {
   user: User | null;
@@ -30,6 +31,15 @@ export const useAuthStore = create<AuthState>((set, get) => ({
     }
     set({ session, user, loading: false, initialized: true });
 
+    if (user) {
+      (async () => {
+        try {
+          await ensureUserKeyPair(user as User);
+        } catch {
+        }
+      })();
+    }
+
     supabase.auth.onAuthStateChange((_event, session) => {
       const nextUser = session?.user ?? null;
       if (nextUser?.id !== lastUserId) {
@@ -37,6 +47,15 @@ export const useAuthStore = create<AuthState>((set, get) => ({
         lastUserId = nextUser?.id ?? null;
       }
       set({ session, user: nextUser ?? null, loading: false });
+
+      if (nextUser) {
+        (async () => {
+          try {
+            await ensureUserKeyPair(nextUser as User);
+          } catch {
+          }
+        })();
+      }
     });
   },
   signOut: async () => {

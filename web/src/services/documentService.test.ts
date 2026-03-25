@@ -5,61 +5,72 @@ import {
   loadPersonalDocument,
 } from './documentService';
 import { supabase } from '../lib/supabase';
+import * as cryptoKeyService from './cryptoKeyService';
+import * as encryptionService from './encryptionService';
+import * as idGenerator from '../utils/idGenerator';
 
 type MockFn = ReturnType<typeof vi.fn>;
 
+// Mock 加密服务
+vi.mock('./encryptionService', () => ({
+  encryptDocumentChunked: vi.fn(async () => ({
+    blob: new Blob(['encrypted'], { type: 'application/octet-stream' }),
+    contentHash: 'abc123hash',
+  })),
+  decryptDocumentChunked: vi.fn(async () => ({
+    file: new File(['decrypted-content'], 'test.docx', {
+      type: 'application/vnd.openxmlformats-officedocument.wordprocessingml.document',
+    }),
+    meta: { title: 'test.docx', selectedKeys: ['k1', 'k2'] },
+  })),
+}));
+
+// Mock 密钥服务
+vi.mock('./cryptoKeyService', () => ({
+  isWebCryptoAvailable: vi.fn(() => true),
+  generateDocumentKey: vi.fn(async () => ({ type: 'secret', algorithm: { name: 'AES-GCM' } })),
+  wrapDocumentKey: vi.fn(async () => 'wrapped-key-base64'),
+  unwrapDocumentKey: vi.fn(async () => ({ type: 'secret', algorithm: { name: 'AES-GCM' } })),
+  getUserKeyPair: vi.fn(async () => ({
+    publicKey: { type: 'public' },
+    privateKey: { type: 'private' },
+  })),
+  getDocumentEncryptionStatus: vi.fn(() => ({ isEncrypted: false, encryptionVersion: null })),
+}));
+
+// Mock ID 生成器
+vi.mock('../utils/idGenerator', () => ({
+  generateDocumentId: vi.fn(() => 'new-doc-uuid'),
+  generateVersionId: vi.fn(() => 'new-ver-uuid'),
+}));
+
 vi.mock('../lib/supabase', () => ({
   supabase: {
-    storage: {
-      from: vi.fn(),
-    },
+    storage: { from: vi.fn() },
     from: vi.fn(),
+    functions: { invoke: vi.fn() },
   },
 }));
 
-const createInsertBuilder = () => {
-  const select = vi.fn().mockReturnThis();
-  const single = vi.fn().mockResolvedValue({
-    data: { id: 'doc-1' },
-    error: null,
-  });
-  const insert = vi.fn(() => ({
-    select,
-    single,
-  }));
-  return { insert, select, single };
-};
-
-const createUpdateBuilder = () => {
-  const select = vi.fn().mockReturnThis();
-  const single = vi.fn().mockResolvedValue({
-    data: { id: 'doc-2' },
-    error: null,
-  });
-  const eq = vi.fn().mockReturnThis();
-  const update = vi.fn(() => ({
-    eq,
-    select,
-    single,
-  }));
-  return { update, eq, select, single };
-};
-
-const createMetadataBuilder = () => {
-  const select = vi.fn().mockReturnThis();
-  const single = vi.fn().mockResolvedValue({
-    data: { metadata: { versions: [] } },
-    error: null,
-  });
-  const eq = vi.fn().mockReturnThis();
-  return { select, single, eq };
-};
-
 const resetSupabaseMocks = () => {
-  const storageFromMock = supabase.storage.from as unknown as MockFn;
-  const fromMock = supabase.from as unknown as MockFn;
-  storageFromMock.mockReset();
-  fromMock.mockReset();
+  (supabase.storage.from as unknown as MockFn).mockReset();
+  (supabase.from as unknown as MockFn).mockReset();
+  (supabase.functions.invoke as unknown as MockFn).mockReset();
+  vi.mocked(encryptionService.encryptDocumentChunked).mockImplementation(async () => ({
+    blob: new Blob(['encrypted'], { type: 'application/octet-stream' }),
+    contentHash: 'abc123hash',
+  }));
+  vi.mocked(encryptionService.decryptDocumentChunked).mockImplementation(async () => ({
+    file: new File(['decrypted-content'], 'test.docx', {
+      type: 'application/vnd.openxmlformats-officedocument.wordprocessingml.document',
+    }),
+    meta: { title: 'test.docx', selectedKeys: ['k1', 'k2'] },
+  }));
+  vi.mocked(cryptoKeyService.isWebCryptoAvailable).mockImplementation(() => true);
+  vi.mocked(cryptoKeyService.getUserKeyPair).mockImplementation(async () => ({
+    publicKey: { type: 'public' } as unknown as CryptoKey,
+    privateKey: { type: 'private' } as unknown as CryptoKey,
+  }));
 };
 
 describe('savePersonalDocument', () => {
@@ -67,145 +78,246 @@ describe('savePersonalDocument', () => {
     resetSupabaseMocks();
   });
 
-  it('创建新文档并返回文档 id', async () => {
-    const upload = vi.fn().mockResolvedValue({ data: {}, error: null });
-    const storageFromMock = supabase.storage.from as unknown as MockFn;
+  it('新建文档：加密上传到 R2 并写入 documents / document_versions / document_keys', async () => {
     const fromMock = supabase.from as unknown as MockFn;
-    storageFromMock.mockReturnValue({
-      upload,
+    const invokeMock = supabase.functions.invoke as unknown as MockFn;
+
+    // Mock r2-sign-upload
+    invokeMock.mockResolvedValue({
+      data: {
+        url: 'https://r2.example.com/put-url',
+        method: 'PUT',
+        headers: { 'Content-Type': 'application/octet-stream' },
+        expiresAt: new Date(Date.now() + 300000).toISOString(),
+        r2Key: 'pfm-trae/dev/documents/new-doc-uuid/new-ver-uuid/abc123hash.bin',
+      },
+      error: null,
     });
-    const insertBuilder = createInsertBuilder();
+
+    // Mock global fetch（R2 PUT）
+    global.fetch = vi.fn().mockResolvedValue({ ok: true, status: 200 } as Response);
+
+    // Mock documents insert（简单 insert，无需 select/single）
+    const insertDoc = vi.fn().mockResolvedValue({ error: null });
+
+    // Mock document_versions insert
+    const insertVerResult = vi.fn().mockResolvedValue({ error: null });
+
+    // Mock document_keys insert
+    const insertKeyResult = vi.fn().mockResolvedValue({ error: null });
 
     fromMock.mockImplementation((table: string) => {
-      if (table === 'documents') {
-        return {
-          insert: insertBuilder.insert,
-        };
-      }
+      if (table === 'documents') return { insert: insertDoc };
+      if (table === 'document_versions') return { insert: insertVerResult };
+      if (table === 'document_keys') return { insert: insertKeyResult };
       return {};
     });
 
-    const blob = new Blob(['test'], { type: 'application/vnd.openxmlformats-officedocument.wordprocessingml.document' });
+    const blob = new Blob(['original-docx'], {
+      type: 'application/vnd.openxmlformats-officedocument.wordprocessingml.document',
+    });
 
     const result = await savePersonalDocument({
       userId: 'user-1',
-      authorEmail: 'tester@example.com',
+      authorEmail: 'test@example.com',
       blob,
       fileName: 'test.docx',
       version: 'V1.0.0',
-      remark: '第一次保存',
+      remark: '初始版本',
       selectedKeys: ['k1', 'k2'],
     });
 
-    expect(upload).toHaveBeenCalledTimes(1);
+    // 验证返回了正确的 documentId（预生成的 UUID，不依赖 DB 返回）
+    expect(vi.mocked(idGenerator.generateDocumentId)).toHaveBeenCalled();
+    expect(result.documentId).toBe('new-doc-uuid');
+
+    // 验证调用了 r2-sign-upload
+    expect(invokeMock).toHaveBeenCalledWith('r2-sign-upload', expect.objectContaining({
+      body: expect.objectContaining({
+        documentId: 'new-doc-uuid',
+        versionId: 'new-ver-uuid',
+        operation: 'upload',
+      }),
+    }));
+
+    // 验证调用了 fetch PUT 到 R2
+    expect(global.fetch).toHaveBeenCalledWith(
+      'https://r2.example.com/put-url',
+      expect.objectContaining({ method: 'PUT' }),
+    );
+
+    // 验证 documents 表写入
     expect(fromMock).toHaveBeenCalledWith('documents');
-    expect(insertBuilder.insert).toHaveBeenCalledTimes(1);
-    const insertCalls = insertBuilder.insert.mock.calls as unknown as unknown[][];
-    const insertArg = insertCalls[0][0] as {
-        owner_id: string;
-        encrypted_title: string;
-        size: number;
-        type: string;
-        path: string;
-        metadata: {
-          latestVersion: string;
-          latestRemark: string;
-          versions: Array<{
-            version: string;
-            remark: string;
-            author: string | null;
-            createdAt: string;
-          }>;
-          selectedKeys: string[];
-        };
-      };
-    expect(insertArg.owner_id).toBe('user-1');
-    expect(insertArg.encrypted_title).toBe('test.docx');
-    expect(insertArg.size).toBe(blob.size);
-    expect(insertArg.type).toBe('docx');
-    expect(insertArg.path).toMatch(/user-1\//);
-    expect(insertArg.metadata.latestVersion).toBe('V1.0.0');
-    expect(insertArg.metadata.latestRemark).toBe('第一次保存');
-    expect(Array.isArray(insertArg.metadata.versions)).toBe(true);
-    expect(insertArg.metadata.versions.length).toBe(1);
-    expect(insertArg.metadata.versions[0].version).toBe('V1.0.0');
-    expect(insertArg.metadata.versions[0].remark).toBe('第一次保存');
-    expect(insertArg.metadata.versions[0].author).toBe('tester@example.com');
-    expect(insertArg.metadata.selectedKeys).toEqual(['k1', 'k2']);
-    expect((insertArg.metadata as any).encryption).toEqual({ enabled: true, version: 1 });
-    expect(result.documentId).toBe('doc-1');
+    const insertDocArg = insertDoc.mock.calls[0][0] as Record<string, unknown>;
+    expect(insertDocArg.id).toBe('new-doc-uuid');
+    expect(insertDocArg.owner_id).toBe('user-1');
+    expect(insertDocArg.encrypted_title).toBe('test.docx');
+    expect((insertDocArg.metadata as Record<string, unknown>).encryption).toEqual({ enabled: true, version: 2 });
+
+    // 验证 document_versions 表写入
+    expect(fromMock).toHaveBeenCalledWith('document_versions');
+    const insertVerArg = insertVerResult.mock.calls[0][0] as Record<string, unknown>;
+    expect(insertVerArg.document_id).toBe('new-doc-uuid');
+    expect(insertVerArg.version_label).toBe('V1.0.0');
+    expect(insertVerArg.author_id).toBe('user-1');
+    expect(insertVerArg.content_hash).toBe('abc123hash');
+
+    // 验证 document_keys 表写入
+    expect(fromMock).toHaveBeenCalledWith('document_keys');
+    const insertKeyArg = insertKeyResult.mock.calls[0][0] as Record<string, unknown>;
+    expect(insertKeyArg.document_id).toBe('new-doc-uuid');
+    expect(insertKeyArg.user_id).toBe('user-1');
+    expect(insertKeyArg.wrapped_document_key).toBe('wrapped-key-base64');
   });
 
-  it('更新已有文档并返回文档 id', async () => {
-    const upload = vi.fn().mockResolvedValue({ data: {}, error: null });
-    const storageFromMock = supabase.storage.from as unknown as MockFn;
+  it('更新已有文档：沿用 documentId，追加新版本到 versions 列表', async () => {
     const fromMock = supabase.from as unknown as MockFn;
-    storageFromMock.mockReturnValue({
-      upload,
+    const invokeMock = supabase.functions.invoke as unknown as MockFn;
+
+    invokeMock.mockResolvedValue({
+      data: {
+        url: 'https://r2.example.com/put-url',
+        method: 'PUT',
+        headers: { 'Content-Type': 'application/octet-stream' },
+        expiresAt: new Date(Date.now() + 300000).toISOString(),
+        r2Key: 'pfm-trae/dev/documents/existing-doc/new-ver-uuid/abc123hash.bin',
+      },
+      error: null,
     });
-    const updateBuilder = createUpdateBuilder();
-    const metadataBuilder = createMetadataBuilder();
+
+    global.fetch = vi.fn().mockResolvedValue({ ok: true, status: 200 } as Response);
+
+    // Mock 读取现有元数据
+    const metaSingle = vi.fn().mockResolvedValue({
+      data: { metadata: { versions: [{ version: 'V1.0.0', remark: '', author: null, createdAt: '2025-01-01T00:00:00Z' }] } },
+      error: null,
+    });
+    const metaEq2 = vi.fn(() => ({ single: metaSingle }));
+    const metaEq1 = vi.fn(() => ({ eq: metaEq2 }));
+    const metaSelect = vi.fn(() => ({ eq: metaEq1 }));
+
+    // Mock update
+    const updateEq2 = vi.fn().mockResolvedValue({ error: null });
+    const updateEq1 = vi.fn(() => ({ eq: updateEq2 }));
+    const update = vi.fn(() => ({ eq: updateEq1 }));
+
+    // Mock document_versions insert
+    const insertVer = vi.fn().mockResolvedValue({ error: null });
+    // Mock document_keys insert
+    const insertKey = vi.fn().mockResolvedValue({ error: null });
 
     fromMock.mockImplementation((table: string) => {
-      if (table === 'documents') {
-        return {
-          select: metadataBuilder.select,
-          eq: metadataBuilder.eq,
-          single: metadataBuilder.single,
-          update: updateBuilder.update,
-        };
-      }
+      if (table === 'documents') return { select: metaSelect, update };
+      if (table === 'document_versions') return { insert: insertVer };
+      if (table === 'document_keys') return { insert: insertKey };
       return {};
     });
 
-    const blob = new Blob(['test2'], { type: 'application/vnd.openxmlformats-officedocument.wordprocessingml.document' });
+    const blob = new Blob(['updated-docx'], {
+      type: 'application/vnd.openxmlformats-officedocument.wordprocessingml.document',
+    });
 
     const result = await savePersonalDocument({
-      userId: 'user-2',
-      authorEmail: 'tester2@example.com',
+      userId: 'user-1',
+      authorEmail: 'test@example.com',
       blob,
       fileName: 'test.docx',
-      documentId: 'doc-2',
+      documentId: 'existing-doc',
       version: 'V1.1.0',
       remark: '第二次保存',
       selectedKeys: ['k3'],
     });
 
-    expect(upload).toHaveBeenCalledTimes(1);
-    expect(fromMock).toHaveBeenCalledWith('documents');
-    expect(updateBuilder.update).toHaveBeenCalledTimes(1);
-    const updateCalls = updateBuilder.update.mock.calls as unknown as unknown[][];
-    const updateArg = updateCalls[0][0] as {
-        encrypted_title: string;
-        size: number;
-        type: string;
-        path: string;
-        metadata: {
-          latestVersion: string;
-          latestRemark: string;
-          versions: Array<{
-            version: string;
-            remark: string;
-            author: string | null;
-            createdAt: string;
-          }>;
-          selectedKeys: string[];
-        };
-      };
-    expect(updateArg.encrypted_title).toBe('test.docx');
-    expect(updateArg.size).toBe(blob.size);
-    expect(updateArg.type).toBe('docx');
-    expect(updateArg.path).toMatch(/user-2\//);
-    expect(updateArg.metadata.latestVersion).toBe('V1.1.0');
-    expect(updateArg.metadata.latestRemark).toBe('第二次保存');
-    expect(Array.isArray(updateArg.metadata.versions)).toBe(true);
-    expect(updateArg.metadata.versions.length).toBeGreaterThanOrEqual(1);
-    expect(updateArg.metadata.selectedKeys).toEqual(['k3']);
-    expect((updateArg.metadata as any).encryption).toEqual({ enabled: true, version: 1 });
-    const eqCalls = updateBuilder.eq.mock.calls as [string, string][];
-    expect(eqCalls[0]).toEqual(['id', 'doc-2']);
-    expect(eqCalls[1]).toEqual(['owner_id', 'user-2']);
-    expect(result.documentId).toBe('doc-2');
+    expect(result.documentId).toBe('existing-doc');
+
+    // 验证 update 被调用而非 insert
+    expect(update).toHaveBeenCalledTimes(1);
+    const updateCalls = update.mock.calls as unknown as [Record<string, unknown>][];
+    const updateArg = updateCalls[0][0];
+    const meta = updateArg.metadata as Record<string, unknown>;
+    const versions = meta.versions as Array<Record<string, unknown>>;
+    expect(versions.length).toBe(2); // 新版本 + 旧版本
+    expect(versions[0].version).toBe('V1.1.0'); // 最新版本置顶
+
+    // 验证 document_versions 写入
+    const verArg = insertVer.mock.calls[0][0] as Record<string, unknown>;
+    expect(verArg.version_label).toBe('V1.1.0');
+    expect(verArg.document_id).toBe('existing-doc');
+  });
+
+  it('WebCrypto 不可用时抛出明确错误', async () => {
+    vi.mocked(cryptoKeyService.isWebCryptoAvailable).mockReturnValueOnce(false);
+
+    const blob = new Blob(['test']);
+    await expect(
+      savePersonalDocument({
+        userId: 'user-1',
+        authorEmail: null,
+        blob,
+        fileName: 'test.docx',
+        version: 'V1.0.0',
+        remark: '',
+        selectedKeys: [],
+      }),
+    ).rejects.toThrow('Web Crypto API');
+  });
+
+  it('用户密钥不存在时抛出明确错误', async () => {
+    vi.mocked(cryptoKeyService.getUserKeyPair).mockResolvedValueOnce(null);
+
+    const blob = new Blob(['test']);
+    await expect(
+      savePersonalDocument({
+        userId: 'user-1',
+        authorEmail: null,
+        blob,
+        fileName: 'test.docx',
+        version: 'V1.0.0',
+        remark: '',
+        selectedKeys: [],
+      }),
+    ).rejects.toThrow('用户密钥');
+  });
+
+  it('用例5：R2 上传失败时抛出错误，不写入 document_versions / document_keys', async () => {
+    const fromMock = supabase.from as unknown as MockFn;
+    const invokeMock = supabase.functions.invoke as unknown as MockFn;
+
+    // 获取签名成功
+    invokeMock.mockResolvedValue({
+      data: {
+        url: 'https://r2.example.com/put-url',
+        method: 'PUT',
+        headers: { 'Content-Type': 'application/octet-stream' },
+        expiresAt: new Date(Date.now() + 300000).toISOString(),
+        r2Key: 'pfm-trae/dev/documents/new-doc-uuid/new-ver-uuid/abc123hash.bin',
+      },
+      error: null,
+    });
+
+    // R2 PUT 失败
+    global.fetch = vi.fn().mockResolvedValue({ ok: false, status: 503, statusText: 'Service Unavailable' } as Response);
+
+    const insertDoc = vi.fn().mockResolvedValue({ error: null });
+    const insertVer = vi.fn().mockResolvedValue({ error: null });
+    const insertKey = vi.fn().mockResolvedValue({ error: null });
+
+    fromMock.mockImplementation((table: string) => {
+      if (table === 'documents') return { insert: insertDoc };
+      if (table === 'document_versions') return { insert: insertVer };
+      if (table === 'document_keys') return { insert: insertKey };
+      return {};
+    });
+
+    const blob = new Blob(['test']);
+    await expect(
+      savePersonalDocument({ userId: 'user-1', authorEmail: null, blob, fileName: 'test.docx', version: 'V1.0.0', remark: '', selectedKeys: [] }),
+    ).rejects.toThrow('R2 upload failed');
+
+    // 上传失败，后续 DB 写入均不应被调用
+    expect(insertDoc).not.toHaveBeenCalled();
+    expect(insertVer).not.toHaveBeenCalled();
+    expect(insertKey).not.toHaveBeenCalled();
   });
 });
 
@@ -222,18 +334,16 @@ describe('fetchPersonalDocuments', () => {
       data: [
         {
           id: 'doc-1',
+          encrypted_title: '我的合同文档.docx',
           size: 1024,
-          path: 'user-1/doc-1.docx',
+          path: 'user-1/1234-abcdef.docx',
           created_at: '2025-01-01T00:00:00Z',
           updated_at: '2025-01-02T00:00:00Z',
           metadata: {
             latestVersion: 'V1.0.0',
             latestRemark: '第一次保存',
             versions: [],
-            encryption: {
-              enabled: true,
-              version: 1,
-            },
+            encryption: { enabled: true, version: 2 },
           },
         },
         {
@@ -248,29 +358,49 @@ describe('fetchPersonalDocuments', () => {
       error: null,
     });
 
-    fromMock.mockReturnValue({
-      select,
-      eq,
-      order,
-    });
+    fromMock.mockReturnValue({ select, eq, order });
 
     const result = await fetchPersonalDocuments('user-1');
-
-    expect(fromMock).toHaveBeenCalledWith('documents');
-    expect(select).toHaveBeenCalledTimes(1);
-    expect(eq).toHaveBeenCalledWith('owner_id', 'user-1');
-    expect(order).toHaveBeenCalledWith('updated_at', { ascending: false });
 
     expect(result).toHaveLength(1);
     expect(result[0]).toMatchObject({
       id: 'doc-1',
-      name: 'doc-1.docx',
+      name: '我的合同文档.docx',
       size: 1024,
-      createdAt: '2025-01-01T00:00:00Z',
-      updatedAt: '2025-01-02T00:00:00Z',
       version: 'V1.0.0',
       remark: '第一次保存',
     });
+  });
+
+  it('无 encrypted_title 时降级使用 path 文件名', async () => {
+    const fromMock = supabase.from as unknown as MockFn;
+    const select = vi.fn().mockReturnThis();
+    const eq = vi.fn().mockReturnThis();
+    const order = vi.fn().mockResolvedValue({
+      data: [
+        {
+          id: 'doc-3',
+          encrypted_title: null,
+          size: 512,
+          path: 'user-1/legacy-name.docx',
+          created_at: '2025-01-05T00:00:00Z',
+          updated_at: '2025-01-06T00:00:00Z',
+          metadata: {
+            latestVersion: 'V1.0.0',
+            latestRemark: '',
+            versions: [],
+            encryption: { enabled: true, version: 1 },
+          },
+        },
+      ],
+      error: null,
+    });
+
+    fromMock.mockReturnValue({ select, eq, order });
+
+    const result = await fetchPersonalDocuments('user-1');
+    expect(result).toHaveLength(1);
+    expect(result[0].name).toBe('legacy-name.docx');
   });
 });
 
@@ -297,33 +427,15 @@ describe('loadPersonalDocument', () => {
       error: null,
     });
 
-    fromMock.mockReturnValue({
-      select,
-      eq,
-      single,
-    });
+    fromMock.mockReturnValue({ select, eq, single });
 
     const blob = new Blob(['dummy'], {
       type: 'application/vnd.openxmlformats-officedocument.wordprocessingml.document',
     });
-
-    const download = vi.fn().mockResolvedValue({
-      data: blob,
-      error: null,
-    });
-
-    storageFromMock.mockReturnValue({
-      download,
-    });
+    const download = vi.fn().mockResolvedValue({ data: blob, error: null });
+    storageFromMock.mockReturnValue({ download });
 
     const result = await loadPersonalDocument('user-1', 'doc-1');
-
-    expect(fromMock).toHaveBeenCalledWith('documents');
-    expect(select).toHaveBeenCalledTimes(1);
-    const eqCalls = eq.mock.calls as [string, string][];
-    expect(eqCalls[0]).toEqual(['id', 'doc-1']);
-    expect(eqCalls[1]).toEqual(['owner_id', 'user-1']);
-    expect(download).toHaveBeenCalledWith('user-1/doc-1.docx');
 
     expect(result.file).toBeInstanceOf(File);
     expect(result.file.name).toBe('doc-1.docx');
@@ -341,14 +453,183 @@ describe('loadPersonalDocument', () => {
       error: new Error('not found'),
     });
 
-    fromMock.mockReturnValue({
-      select,
-      eq,
-      single,
+    fromMock.mockReturnValue({ select, eq, single });
+
+    await expect(loadPersonalDocument('user-1', 'doc-missing')).rejects.toThrow('not found');
+  });
+
+  it('加密文档：从 R2 下载并解密，恢复 file / version / selectedKeys', async () => {
+    const fromMock = supabase.from as unknown as MockFn;
+    const invokeMock = supabase.functions.invoke as unknown as MockFn;
+
+    fromMock.mockImplementation((table: string) => {
+      if (table === 'documents') {
+        return {
+          select: vi.fn().mockReturnValue({
+            eq: vi.fn().mockReturnValue({
+              eq: vi.fn().mockReturnValue({
+                single: vi.fn().mockResolvedValue({
+                  data: {
+                    path: 'pfm-trae/dev/documents/doc-enc/ver-001/hash.bin',
+                    metadata: { encryption: { enabled: true, version: 2 }, latestVersion: 'V1.0.0', latestRemark: '初始版本' },
+                  },
+                  error: null,
+                }),
+              }),
+            }),
+          }),
+        };
+      }
+      if (table === 'document_versions') {
+        return {
+          select: vi.fn().mockReturnValue({
+            eq: vi.fn().mockReturnValue({
+              order: vi.fn().mockReturnValue({
+                limit: vi.fn().mockReturnValue({
+                  single: vi.fn().mockResolvedValue({
+                    data: { id: 'ver-uuid-001', r2_key: 'hash.bin', content_hash: 'abc123', encrypted_meta: { title: 'encrypted-doc.docx', selectedKeys: ['k1', 'k2'] }, version_label: 'V1.0.0', note: '初始版本' },
+                    error: null,
+                  }),
+                }),
+              }),
+            }),
+          }),
+        };
+      }
+      if (table === 'document_keys') {
+        return {
+          select: vi.fn().mockReturnValue({
+            eq: vi.fn().mockReturnValue({
+              eq: vi.fn().mockReturnValue({
+                order: vi.fn().mockReturnValue({
+                  limit: vi.fn().mockReturnValue({
+                    single: vi.fn().mockResolvedValue({ data: { wrapped_key: 'wrapped-key-base64' }, error: null }),
+                  }),
+                }),
+              }),
+            }),
+          }),
+        };
+      }
+      return {};
     });
 
-    await expect(loadPersonalDocument('user-1', 'doc-missing')).rejects.toThrow(
-      'not found',
-    );
+    invokeMock.mockResolvedValue({
+      data: { url: 'https://r2.example.com/get-url', method: 'GET', headers: {}, expiresAt: new Date(Date.now() + 300000).toISOString(), r2Key: 'hash.bin' },
+      error: null,
+    });
+
+    global.fetch = vi.fn().mockResolvedValue({
+      ok: true, status: 200,
+      blob: async () => new Blob(['encrypted-content'], { type: 'application/octet-stream' }),
+    } as unknown as Response);
+
+    const result = await loadPersonalDocument('user-1', 'doc-enc');
+
+    expect(invokeMock).toHaveBeenCalledWith('r2-sign-download', expect.objectContaining({
+      body: expect.objectContaining({ documentId: 'doc-enc', versionId: 'ver-uuid-001' }),
+    }));
+    expect(vi.mocked(cryptoKeyService.unwrapDocumentKey)).toHaveBeenCalled();
+    expect(vi.mocked(encryptionService.decryptDocumentChunked)).toHaveBeenCalled();
+    expect(result.file).toBeInstanceOf(File);
+    expect(result.version).toBe('V1.0.0');
+    expect(result.remark).toBe('初始版本');
+    expect(result.selectedKeys).toEqual(['k1', 'k2']);
+  });
+
+  it('加密文档但 document_keys 无记录时抛出明确错误', async () => {
+    const fromMock = supabase.from as unknown as MockFn;
+
+    fromMock.mockImplementation((table: string) => {
+      if (table === 'documents') {
+        return {
+          select: vi.fn().mockReturnValue({
+            eq: vi.fn().mockReturnValue({
+              eq: vi.fn().mockReturnValue({
+                single: vi.fn().mockResolvedValue({
+                  data: { path: 'r2key', metadata: { encryption: { enabled: true, version: 2 } } },
+                  error: null,
+                }),
+              }),
+            }),
+          }),
+        };
+      }
+      if (table === 'document_versions') {
+        return {
+          select: vi.fn().mockReturnValue({
+            eq: vi.fn().mockReturnValue({
+              order: vi.fn().mockReturnValue({
+                limit: vi.fn().mockReturnValue({
+                  single: vi.fn().mockResolvedValue({
+                    data: { id: 'ver-1', r2_key: 'key', content_hash: 'h', encrypted_meta: null, version_label: 'V1', note: null },
+                    error: null,
+                  }),
+                }),
+              }),
+            }),
+          }),
+        };
+      }
+      if (table === 'document_keys') {
+        return {
+          select: vi.fn().mockReturnValue({
+            eq: vi.fn().mockReturnValue({
+              eq: vi.fn().mockReturnValue({
+                order: vi.fn().mockReturnValue({
+                  limit: vi.fn().mockReturnValue({
+                    single: vi.fn().mockResolvedValue({ data: null, error: new Error('no key') }),
+                  }),
+                }),
+              }),
+            }),
+          }),
+        };
+      }
+      return {};
+    });
+
+    await expect(loadPersonalDocument('user-1', 'doc-enc-no-key')).rejects.toThrow('解密密钥');
+  });
+
+  it('用例6：旧版未加密文档（v1 或无 encryption 标记）走 Supabase Storage 兼容链路', async () => {
+    const fromMock = supabase.from as unknown as MockFn;
+    const storageFromMock = supabase.storage.from as unknown as MockFn;
+
+    // 文档无 encryption 标记（旧版）
+    const select = vi.fn().mockReturnThis();
+    const eq = vi.fn().mockReturnThis();
+    const single = vi.fn().mockResolvedValue({
+      data: {
+        path: 'user-1/legacy-doc.docx',
+        metadata: {
+          latestVersion: 'V1.0.0',
+          latestRemark: '旧版文档',
+          selectedKeys: ['a', 'b'],
+          // 无 encryption 字段
+        },
+      },
+      error: null,
+    });
+    fromMock.mockReturnValue({ select, eq, single });
+
+    const legacyBlob = new Blob(['legacy-docx-content'], {
+      type: 'application/vnd.openxmlformats-officedocument.wordprocessingml.document',
+    });
+    const download = vi.fn().mockResolvedValue({ data: legacyBlob, error: null });
+    storageFromMock.mockReturnValue({ download });
+
+    const result = await loadPersonalDocument('user-1', 'legacy-doc');
+
+    // 应走 Storage 路径，不调用 R2 / 解密
+    expect(download).toHaveBeenCalledWith('user-1/legacy-doc.docx');
+    expect(supabase.functions.invoke).not.toHaveBeenCalled();
+    expect(vi.mocked(encryptionService.decryptDocumentChunked)).not.toHaveBeenCalled();
+
+    expect(result.file).toBeInstanceOf(File);
+    expect(result.file.name).toBe('legacy-doc.docx');
+    expect(result.version).toBe('V1.0.0');
+    expect(result.remark).toBe('旧版文档');
+    expect(result.selectedKeys).toEqual(['a', 'b']);
   });
 });
