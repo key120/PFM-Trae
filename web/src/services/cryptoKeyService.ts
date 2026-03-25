@@ -94,7 +94,7 @@ const upsertUserPublicKey = async (user: User, publicJwk: JsonWebKey): Promise<v
   }
 };
 
-export const backupUserPrivateKey = async (user: User, privateKey: CryptoKey): Promise<void> => {
+export const backupUserPrivateKey = async (privateKey: CryptoKey): Promise<void> => {
   if (!isWebCryptoAvailable()) return;
   try {
     const privateKeyJwk = await crypto.subtle.exportKey('jwk', privateKey);
@@ -109,7 +109,7 @@ export const backupUserPrivateKey = async (user: User, privateKey: CryptoKey): P
   }
 };
 
-export const restoreUserPrivateKey = async (user: User): Promise<CryptoKey | null> => {
+export const restoreUserPrivateKey = async (): Promise<CryptoKey | null> => {
   if (!isWebCryptoAvailable()) return null;
   try {
     const { data, error } = await supabase.functions.invoke('key-restore', { body: {} });
@@ -142,7 +142,11 @@ export const restoreUserPrivateKey = async (user: User): Promise<CryptoKey | nul
       ['encrypt'],
     );
 
-    await saveKeyPair(user.id, { publicKey, privateKey } as CryptoKeyPair);
+    const { data: userData } = await supabase.auth.getUser();
+    const userId = userData?.user?.id;
+    if (!userId) return null;
+    
+    await saveKeyPair(userId, { publicKey, privateKey } as CryptoKeyPair);
     return privateKey;
   } catch {
     return null;
@@ -159,7 +163,7 @@ export const ensureUserKeyPair = async (user: User): Promise<void> => {
 
     if (!stored) {
       // 优先从备份恢复
-      await restoreUserPrivateKey(user);
+      await restoreUserPrivateKey();
       stored = await getStoredKeyPair(user.id);
     }
 
@@ -183,7 +187,7 @@ export const ensureUserKeyPair = async (user: User): Promise<void> => {
       };
 
       // 自动备份新生成的私钥
-      await backupUserPrivateKey(user, keyPair.privateKey);
+      await backupUserPrivateKey(keyPair.privateKey);
     }
 
     const publicJwk = await crypto.subtle.exportKey('jwk', stored.publicKey);
