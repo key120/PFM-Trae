@@ -3,172 +3,104 @@
 This file provides guidance to Claude Code (claude.ai/code) when working with code in this repository.
 
 ## 项目概览
-
-- 这是一个以 `web/` 为主的前端项目：Vite + React + TypeScript + Ant Design。
-- 核心用户流程是：上传 DOCX → 解析标题结构 → 预览文档 → 勾选保留章节 → 导出新 DOCX。
-- 认证依赖 Supabase Auth；前端状态主要由 Zustand 管理。
-- 代码里已经有密钥管理、加密 Blob 格式、团队共享表结构，但当前主 UI 仍以“个人文档”流程为主，共享功能还没真正接通。
+- 项目名：项目文档管理器（PFM‑Trae）
+- 前端入口：`web/`（Vite 7 + React 19 + TypeScript 5.9 + Ant Design 6）
+- 主要流程：上传 DOCX → 解析标题 → 预览 → 勾选章节 → 导出新 DOCX
+- 认证：Supabase Auth；状态管理：Zustand 5；加密文档存储：Cloudflare R2
+- 当前开发主线是“个人文档加密保存/加载 + 密钥备份恢复 + 团队基础设施”；团队管理已具备可用 UI，但文档共享主界面仍在开发中。
+- 所有 UI 文本为中文。
 
 ## 常用命令
-
-所有前端命令都在 `web/` 目录下执行：
+> 所有命令均在项目根目录的 `web/` 子目录执行。
 
 ```bash
 cd web
-npm install
-npm run dev
-npm run build
-npm run lint
-npm run test
-npm run preview
+npm install           # 安装依赖
+npm run dev           # 启动开发服务器（预先会 kill 占用 3000 端口的进程）
+npm run build         # 打包生产构建
+npm run lint          # 代码检查
+npm run test          # 运行全部单元/集成测试
+npm run test:watch    # 监听模式运行测试
+npm run preview       # 本地预览构建产物
 ```
 
-运行单个测试文件：
-
+### 运行单个测试文件
 ```bash
 cd web
 npx vitest run src/services/documentService.test.ts
+npx vitest run src/services/documentService.sharing.test.ts
+npx vitest run src/services/teamService.test.ts
+npx vitest run src/store/useAuthStore.test.ts
+npx vitest run src/components/PersonalDocumentList.test.tsx
+npx vitest run src/components/TeamInfoModal.test.tsx
 ```
 
-运行单个测试用例：
-
+### 运行单个测试用例（示例）
 ```bash
 cd web
-npx vitest run src/services/documentService.test.ts -t "loads document from storage"
+npx vitest run src/store/useAuthStore.test.ts -t "initialize 时会调用 ensureUserKeyPair"
+npx vitest run src/services/documentService.test.ts -t "新建文档：加密上传到 R2 并写入 documents / document_versions / document_keys"
+npx vitest run src/services/documentService.sharing.test.ts -t "成功共享：为所有目标用户分发密钥，返回 distributed 列表"
 ```
 
 ## 运行注意事项
+- `npm run dev` 会先执行 `web/scripts/pre-start.js`，使用 `lsof` 检测并 **kill -9** 占用 `3000` 端口的进程。若本机有其他服务占用该端口，请先修改 Vite 端口或手动停止对应进程。
+- `web/src/lib/supabase.ts` 会在模块加载时读取环境变量，缺少以下两个变量会直接抛错：
+  ```bash
+  VITE_SUPABASE_URL=...
+  VITE_SUPABASE_ANON_KEY=...
+  ```
+- 项目根目录包含 `.env`，其中已提交真实的 Supabase URL、anon key、service‑role key 与 GitHub PAT。务必保持此文件受控，避免泄露。
+- Edge Function 部署需要的服务端环境变量（不在前端 `.env` 中）：`MASTER_KEY_BASE64`、`R2_ACCOUNT_ID`、`R2_BUCKET_NAME`、`R2_ACCESS_KEY_ID`、`R2_SECRET_ACCESS_KEY`、`R2_S3_ENDPOINT`。
+- `web/vercel.json` 配置了 SPA 回退 `/(.*) -> /index.html`。
 
-- `npm run dev` 会先执行 `web/scripts/pre-start.js`，它会用 `lsof` 查找占用 `3000` 端口的进程，并直接执行 `kill -9`。如果本机有别的服务跑在 3000 端口，启动前先确认。
-- `web/src/lib/supabase.ts` 在模块加载时就会读取环境变量；缺少下面两个变量时会直接抛错：
+## 高层架构概览
+### 1. 应用入口与页面骨架
+- `web/src/main.tsx` 挂载根应用。
+- `web/src/router/index.tsx` 通过 `AuthGuard` + `MainLayout` 包裹受保护区域，默认进入 `/dashboard`。
+- `MainLayout` 提供统一头部、用户菜单、团队入口与右侧文档抽屉；文档抽屉分为“个人文档”和“共享文档”两个标签页，其中共享页当前仍是占位状态。
 
-```bash
-VITE_SUPABASE_URL=...
-VITE_SUPABASE_ANON_KEY=...
-```
+### 2. 核心业务流：上传 → 解析 → 预览 → 保存/导出
+- `web/src/pages/Dashboard.tsx` 是主编排页：监听当前文件、触发目录解析、驱动预览、打开保存弹窗、执行导出。
+- `web/src/store/useDocStore.ts` 保存当前文件、标题树、勾选结果、当前文档 ID/版本与初始勾选状态。
+- `web/src/components/UploadZone.tsx` 负责上传入口；`web/src/utils/docParser.ts` 负责从 DOCX 提取标题树；`web/src/components/TableOfContents.tsx` 负责目录勾选；`web/src/components/DocumentPreview.tsx` 负责基于 `docx-preview` 渲染文档并做 DOM 后处理；`web/src/utils/documentExporter.ts` 负责按勾选结果重写 DOCX 包内容并导出。
 
-## 高层架构
+### 3. 认证、密钥与加密存储
+- `web/src/store/useAuthStore.ts` 管理 Supabase 会话，并在初始化/登录后触发 `ensureUserKeyPair`。
+- `web/src/services/cryptoKeyService.ts` 负责 RSA 密钥对的 IndexedDB 存取、私钥备份/恢复，以及文档密钥分发/撤销等能力。
+- `web/src/services/documentService.ts` 负责个人文档完整链路：生成/复用 `documentId`、生成 AES 文档密钥、用用户公钥包装密钥、分块加密 DOCX、调用 Edge Function 获取 R2 预签名地址上传、写入 `documents` / `document_versions` / `document_keys`；载入时执行反向下载解密。
+- Edge Functions 位于 `supabase/functions/`，当前关键函数包括 `r2-sign-upload`、`r2-sign-download`、`key-backup`、`key-restore`。
 
-### 1. 路由、认证与应用外壳
+### 4. 团队与共享能力
+- 数据库迁移在 `supabase/migrations/` 中定义 `teams`、`team_groups`、`team_members`、`team_invitations`、`document_shares` 及相关触发器/RLS/RPC。
+- `web/src/services/teamService.ts` 提供团队创建、成员组管理、成员邀请与成员信息更新；创建团队优先走 `create_team_with_owner` RPC，缺失时回退到前端双写逻辑。
+- `web/src/store/useTeamStore.ts` 保存团队列表与当前团队。
+- `web/src/components/TeamInfoModal.tsx` 已实现团队信息、邀请成员、成员编辑、成员组 CRUD；`MainLayout` 已接入新建团队、切换团队、查看团队信息。
+- 文档共享底层逻辑已在 `documentService.ts` 与 `documentService.sharing.test.ts` 中实现，但主 UI 尚未打通；`PersonalDocumentList.tsx` 当前的共享按钮仍以占位交互为主。
 
-- `web/src/main.tsx` 只负责挂载路由。
-- `web/src/router/index.tsx` 目前只有 `/dashboard`、`/login`、`/register` 和兜底 `*` 路由；受保护区域统一包在 `AuthGuard` + `MainLayout` 里。
-- `web/src/components/AuthGuard.tsx` 会在首次进入时触发 `useAuthStore.initialize()`；未登录时跳回 `/login`。
-- `web/src/store/useAuthStore.ts` 是认证状态中心：
-  - 从 `supabase.auth.getSession()` 初始化 session。
-  - 订阅 `onAuthStateChange`。
-  - 用户切换或登出时重置 `useDocStore`。
-  - 登录后异步调用 `ensureUserKeyPair`，但这里的异常会被吞掉，不阻断登录。
-- `web/src/layout/MainLayout.tsx` 提供顶部导航、用户菜单和右侧文档抽屉；“共享文档”标签页目前只是占位。
+## 测试概览
+- 核心业务：`documentService.test.ts`（加密上传、版本管理、下载解密）
+- 共享逻辑：`documentService.sharing.test.ts`
+- 加密实现：`encryptionService.test.ts`、`cryptoKeyService.test.ts`
+- 团队管理：`teamService.test.ts`
+- 认证与密钥初始化：`useAuthStore.test.ts`
+- UI 交互测试：`*.test.tsx`（个人文档列表、保存弹窗、团队弹窗、布局等）
+- 测试入口：`web/src/test/setup.ts`
 
-### 2. 文档主流程由 Dashboard 编排
+## 当前开发进度
+- 已完成：个人文档加密保存/加载、版本元数据管理、R2 预签名上传下载、用户私钥备份恢复、登录后自动密钥初始化。
+- 已完成：团队创建、成员查看、成员组管理、邀请成员、团队入口 UI。
+- 进行中：共享文档主界面与个人文档列表中的真实共享操作；当前布局中“共享文档”页仍显示“功能开发中”，个人文档列表中的共享相关弹窗也还不是完整业务流。
 
-- `web/src/pages/Dashboard.tsx` 是核心编排页：
-  - 监听 `currentFile`，在文件变化后调用 `parseDocumentHeadings` 解析目录。
-  - 初始化/恢复 `checkedKeys`。
-  - 打开保存弹窗并调用 `savePersonalDocument`。
-  - 调用 `exportDocument` 导出过滤后的文档。
-  - 保存成功后会派发 `personalDocumentsChanged` 事件，驱动文档列表刷新。
-- `web/src/store/useDocStore.ts` 保存当前文件、解析状态、标题树、勾选结果、当前文档 ID/版本，以及 `initialCheckedKeys`。
-- `web/src/components/UploadZone.tsx` 只接受小于 50MB 的 DOCX，并把文件写入 `useDocStore`。
-
-### 3. DOCX 解析、预览和导出是三条不同链路
-
-#### 标题解析
-
-- `web/src/utils/docParser.ts` 用 `mammoth` 先把 DOCX 转成 HTML，再从 `h1-h6` 和目录（TOC）样式里恢复标题树。
-- 这里有不少启发式逻辑：会尝试把目录里的章节号映射回标题文本，因此修改解析逻辑时要同时考虑“正文标题”和“目录标题”两种来源。
-
-#### 预览渲染
-
-- `web/src/components/DocumentPreview.tsx` 先用 `docx-preview` 渲染，再做大量 DOM 级后处理。
-- 这个组件不仅是“显示文档”，还负责：
-  - 手动分页
-  - 目录强制换页
-  - 页眉/页脚重排
-  - 页码重写
-  - 重新填补分页空白和再次分页
-- 如果预览页数、目录分页、页眉页脚位置出问题，优先看这个文件，而不是只看样式文件。
-
-#### 导出 DOCX
-
-- `web/src/utils/documentExporter.ts` 不是重新生成 DOCX，而是直接用 `JSZip` 改写原始 DOCX 包内的 XML：
-  - 读取 `word/document.xml` 和 `word/styles.xml`
-  - 按勾选章节删掉不需要的段落
-  - 自动把父级标题补进导出集合
-  - 用 `numbering.ts` 重新计算标题编号
-  - 显式写入 `w:numId=0` 来关闭 Word 自动编号，再把新的编号直接写回标题文本
-  - 更新 `word/settings.xml`，强制 Word 打开后刷新 TOC 字段
-- 因为这里直接操作 WordprocessingML，任何“看起来只是文案/样式调整”的改动都可能影响导出结果。
-
-### 4. 当前已接通的持久化路径：加密 + R2 + Supabase
-
-`web/src/services/documentService.ts` 是当前 UI 真正在用的文档服务层，已完整接通加密和 R2 上传：
-
-- `fetchPersonalDocuments(userId)`
-  - 读取 `documents` 表
-  - 只保留 `metadata.encryption.enabled === true` 的记录
-  - 过滤掉 `path` 以 `r2://dummy` 开头的测试数据
-  - 从 `metadata.latestVersion` / `metadata.latestRemark` / `metadata.versions` 组装列表项
-- `savePersonalDocument(...)` — 完整加密上传流程（6 步）：
-  1. 生成 `documentId`（新建）或复用已有 ID，同时生成 `versionId`
-  2. 从 IndexedDB 读取用户 RSA 公钥
-  3. 生成本次 AES-GCM-256 文档密钥 `documentKey`
-  4. 用公钥封装 `documentKey` → `wrappedKey`，写入 `document_keys` 表
-  5. 用 `encryptDocumentChunked` 分块加密原始 DOCX，获得 `encryptedBlob` + `contentHash`
-  6. 调用 `r2-sign-upload` Edge Function 获取预签名 PUT URL，上传到 R2；同时写 `document_versions` 和 `documents` 表
-- `loadPersonalDocument(...)`
-  - 从 `document_versions` 表取最新版本的 `r2_key` 和 `encrypted_meta`
-  - 调用 `r2-sign-download` Edge Function 获取预签名 GET URL，从 R2 下载加密 Blob
-  - 用 `unwrapDocumentKey` + 私钥解封 `wrappedKey`，再用 `decryptDocumentChunked` 解密
-  - 恢复成 `File` 并带回 `selectedKeys`
-
-**Supabase 数据库表结构（完整）：**
-- `documents`：文档主记录，`owner_id`、`encrypted_title`、`metadata`（含版本摘要）
-- `document_versions`：每次保存的版本行，含 `r2_key`、`content_hash`、`encrypted_meta`、`size_bytes`
-- `document_keys`：每用户的 `wrapped_document_key`（RSA 封装后），主键 `(document_id, user_id, key_version)`
-- 团队相关表见第 6 节
-
-**Edge Functions（`supabase/functions/`）：**
-- `r2-sign-upload`：验证 JWT + 文档所有权，返回 R2 预签名 PUT URL（5 分钟有效），并写 `audit_logs`
-- `r2-sign-download`：验证 JWT + 文档所有权，返回 R2 预签名 GET URL
-- `key-backup` / `key-restore`：私钥备份/恢复（通过 master key 加密）
-- R2 对象键格式：`pfm-trae/{env}/documents/{documentId}/{versionId}/{hash32}.bin`
-
-### 5. 加密体系（已接通主路径）
-
-- `web/src/services/cryptoKeyService.ts` 管理每用户 RSA-OAEP 密钥对：
-  - 本地存到 IndexedDB：`pfm_trae_crypto / user_keys`
-  - 登录后 `ensureUserKeyPair()` 会按”本地读取 → 远端恢复 → 重新生成”的顺序尝试拿到密钥
-  - 公钥会写回 Supabase `profiles.public_key`
-  - 私钥备份/恢复通过 Edge Functions：`key-backup` / `key-restore`
-- `web/src/services/encryptionService.ts` 提供两套加密 Blob 格式：
-  - v1：单次 AES-GCM 加密
-  - v2：分块 AES-GCM 加密，默认 chunk size 为 1MB，带 header、meta hash 和完整性校验
-  - `savePersonalDocument` 使用 v2（`encryptDocumentChunked`）
-- `web/src/utils/idGenerator.ts`：用 `crypto.randomUUID()` 生成 `documentId` 和 `versionId`
-
-### 6. “共享/团队”目前主要停留在 SQL 和占位 UI
-
-- `supabase/migrations/20250321000001_team_tables.sql` 和 `20250321000002_shares_notifications.sql` 已经建立了团队共享相关表和 RLS：
-  - `teams`
-  - `team_groups`
-  - `team_members`
-  - `team_invitations`
-  - `document_shares`
-  - `notifications`
-- 但前端还没真正接通：
-  - `MainLayout.tsx` 的“共享文档”标签页只是提示“开发中”。
-  - `PersonalDocumentList.tsx` 里的“共享 / 取消共享”只是在组件本地状态里切换，不会写数据库。
-
-## 测试分布
-
-- `web/src/services/*.test.ts`：服务层测试，覆盖文档存储、密钥恢复、加密格式等核心逻辑。
-- `web/src/store/useAuthStore.test.ts`：认证初始化和密钥初始化副作用。
-- `web/src/components/*.test.tsx`、`web/src/layout/*.test.tsx`：界面和交互行为测试。
-- 测试环境入口在 `web/src/test/setup.ts`。
+## 测试账号与测试数据
+- 测试账号邮箱：`key120@126.com`
+- 测试账号密码：`37201120`
+- 测试文档：项目根目录下的 `1.docx`
 
 ## 额外说明
+- 项目根目录未包含 `.cursor/rules/`、`.cursorrules` 或 `.github/copilot-instructions.md`，因此暂无额外 Copilot/Cursor 规则。
+- `web/README.md` 仍是默认 Vite 模板，项目特有信息以本文件为准。
+- `web/scripts/pre-start.js` 会在启动开发服务前调用 `lsof` 并 `kill -9` 占用 3000 端口的进程；启动前注意确认该端口没有其他重要服务。
 
-- `web/README.md` 仍是默认 Vite 模板，项目特有信息主要以源码和本文件为准。
-- 仓库根目录的 `开发计划.md`、`需求文档.md`、`部署指南.md` 更偏产品/计划信息；做实现时优先以当前代码路径是否真的接通为准。
+---
+*Generated by Claude Code using the `using-superpowers` skill.*

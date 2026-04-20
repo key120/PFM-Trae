@@ -13,7 +13,7 @@ vi.mock('../lib/supabase', () => ({
       invoke: vi.fn(),
     },
     from: vi.fn(),
-    auth: { getSession: vi.fn() },
+    auth: { getSession: vi.fn(), getUser: vi.fn() },
   },
 }));
 
@@ -69,19 +69,33 @@ describe('backupUserPrivateKey', () => {
     vi.clearAllMocks();
   });
 
-  it('调用失败时静默返回不抛出异常', async () => {
+  it('调用 key-backup 时携带调用方传入的 keyVersion', async () => {
     const { supabase } = await import('../lib/supabase');
     vi.mocked(supabase.functions.invoke).mockResolvedValue({
-      data: null,
-      error: new Error('network error'),
+      data: { success: true },
+      error: null,
     } as any);
 
+    const originalIndexedDB = (globalThis as { indexedDB?: unknown }).indexedDB;
+    (globalThis as { indexedDB?: unknown }).indexedDB = {};
+
+    const exportKeySpy = vi
+      .spyOn(globalThis.crypto.subtle, 'exportKey')
+      .mockResolvedValue({ kty: 'RSA' } as JsonWebKey);
+
     const { backupUserPrivateKey } = await import('./cryptoKeyService');
-    const fakeUser = { id: 'user-123' } as any;
     const fakeKey = {} as CryptoKey;
 
-    await expect(backupUserPrivateKey(fakeUser, fakeKey)).resolves.toBeUndefined();
+    await backupUserPrivateKey(fakeKey, 7);
+
+    expect(supabase.functions.invoke).toHaveBeenCalledWith('key-backup', {
+      body: expect.objectContaining({ keyVersion: 7 }),
+    });
+
+    exportKeySpy.mockRestore();
+    (globalThis as { indexedDB?: unknown }).indexedDB = originalIndexedDB;
   });
+
 });
 
 describe('restoreUserPrivateKey', () => {

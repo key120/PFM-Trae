@@ -3,6 +3,7 @@ import { Alert, Button, Card, Dropdown, Empty, Skeleton, Tag, Typography, messag
 import { useAuthStore } from '../store/useAuthStore';
 import { useDocStore } from '../store/useDocStore';
 import { fetchPersonalDocuments, loadPersonalDocument, PersonalDocument } from '../services/documentService';
+import { ensureUserKeyPair, restoreUserPrivateKey } from '../services/cryptoKeyService';
 
 interface PersonalDocumentListProps {
   open: boolean;
@@ -136,9 +137,7 @@ const PersonalDocumentList: React.FC<PersonalDocumentListProps> = ({ open, loade
     if (!user) {
       return;
     }
-    try {
-      setLoadingDocumentId(item.id);
-      const result = await loadPersonalDocument(user.id, item.id);
+    const applyLoadedDocument = (result: Awaited<ReturnType<typeof loadPersonalDocument>>) => {
       if (Array.isArray(result.selectedKeys)) {
         setInitialCheckedKeys(result.selectedKeys);
       } else {
@@ -151,8 +150,41 @@ const PersonalDocumentList: React.FC<PersonalDocumentListProps> = ({ open, loade
       if (onLoaded) {
         onLoaded();
       }
-    } catch {
-      message.error('载入文档失败，请重试');
+    };
+
+    try {
+      setLoadingDocumentId(item.id);
+      await ensureUserKeyPair(user);
+      try {
+        const result = await loadPersonalDocument(user.id, item.id);
+        applyLoadedDocument(result);
+      } catch (error) {
+        const errorCode =
+          error && typeof error === 'object' && 'code' in error
+            ? (error as { code?: string }).code
+            : undefined;
+
+        // 首次载入失败时，主动尝试一次远端私钥恢复并重试。
+        // 这样即便错误未携带 KEY_NOT_READY，也不会漏掉 key-restore 触发机会。
+        await restoreUserPrivateKey();
+        await ensureUserKeyPair(user);
+
+        if (errorCode === 'KEY_NOT_READY') {
+          const retryResult = await loadPersonalDocument(user.id, item.id);
+          applyLoadedDocument(retryResult);
+          return;
+        }
+
+        const retryResult = await loadPersonalDocument(user.id, item.id);
+        applyLoadedDocument(retryResult);
+      }
+    } catch (error) {
+      const errorMessage =
+        error instanceof Error && error.message
+          ? error.message
+          : '载入文档失败，请重试';
+      console.error('[PersonalDocumentList] load document failed', error);
+      message.error(`载入文档失败：${errorMessage}`);
     } finally {
       setLoadingDocumentId((current) => (current === item.id ? null : current));
     }
@@ -177,7 +209,7 @@ const PersonalDocumentList: React.FC<PersonalDocumentListProps> = ({ open, loade
   if (error) {
     return (
       <div>
-        <Alert type="error" message="加载个人文档失败" description={error} showIcon />
+        <Alert type="error" title="加载个人文档失败" description={error} showIcon />
         <Button type="link" onClick={handleRetry}>
           重试
         </Button>

@@ -37,7 +37,7 @@ const SaveDocumentModal: React.FC<SaveDocumentModalProps> = ({
       open={open}
       title="保存文档"
       maskClosable
-      destroyOnClose={false}
+      destroyOnHidden={false}
       centered
       style={{ ['--ant-modal-content-padding' as string]: '16px 20px' }}
       confirmLoading={confirmLoading}

@@ -1,8 +1,10 @@
 import { describe, expect, it, vi } from 'vitest';
-import { render, screen, waitFor } from '@testing-library/react';
+import { render, screen, waitFor, act } from '@testing-library/react';
 import userEvent from '@testing-library/user-event';
+import { message } from 'antd';
 import PersonalDocumentList from './PersonalDocumentList';
 import * as documentService from '../services/documentService';
+import * as cryptoKeyService from '../services/cryptoKeyService';
 
 const mockAuthState = {
   user: { id: 'user-1', email: 'tester@example.com' },
@@ -29,6 +31,10 @@ vi.mock('../store/useDocStore', () => ({
 }));
 
 vi.mock('../services/documentService');
+vi.mock('../services/cryptoKeyService', () => ({
+  ensureUserKeyPair: vi.fn(),
+  restoreUserPrivateKey: vi.fn(),
+}));
 
 describe('PersonalDocumentList', () => {
   it('无数据时展示空态', async () => {
@@ -151,7 +157,9 @@ describe('PersonalDocumentList', () => {
       expect(screen.getByText('第一次文档')).toBeTruthy();
     });
 
-    window.dispatchEvent(new Event('personalDocumentsChanged'));
+    await act(async () => {
+      window.dispatchEvent(new Event('personalDocumentsChanged'));
+    });
 
     await waitFor(() => {
       expect(screen.getByText('第二次文档')).toBeTruthy();
@@ -208,6 +216,152 @@ describe('PersonalDocumentList', () => {
     expect(setCurrentDocumentId).toHaveBeenCalledWith('doc-1');
     expect(setCurrentDocumentVersion).toHaveBeenCalledWith('V1.0.3');
     expect(setInitialCheckedKeys).toHaveBeenCalledWith(['k1', 'k2']);
+  });
+
+  it('首次载入抛出 KEY_NOT_READY 时会初始化密钥并自动重试', async () => {
+    const user = userEvent.setup();
+    const loader = vi.fn().mockResolvedValue([
+      {
+        id: 'doc-1',
+        name: '测试文档',
+        size: 1024,
+        createdAt: '2025-01-01T00:00:00Z',
+        updatedAt: '2025-01-02T00:00:00Z',
+      },
+    ]);
+
+    const loadMock = documentService.loadPersonalDocument as unknown as MockFn;
+    const keyNotReadyError = Object.assign(new Error('key not ready'), { code: 'KEY_NOT_READY' });
+    loadMock
+      .mockRejectedValueOnce(keyNotReadyError)
+      .mockResolvedValueOnce({
+        file: new File(['test'], 'loaded.docx', {
+          type: 'application/vnd.openxmlformats-officedocument.wordprocessingml.document',
+        }),
+        version: 'V1.0.3',
+        remark: '最新备注',
+        selectedKeys: ['k1', 'k2'],
+      });
+
+    const ensureMock = vi.mocked(cryptoKeyService.ensureUserKeyPair);
+    ensureMock.mockResolvedValue(undefined);
+    const restoreMock = vi.mocked(cryptoKeyService.restoreUserPrivateKey);
+    restoreMock.mockResolvedValueOnce(null);
+
+    render(<PersonalDocumentList open loader={loader} />);
+
+    await waitFor(() => {
+      expect(screen.getByText('测试文档')).toBeTruthy();
+    });
+
+    await user.click(screen.getByRole('button', { name: /载.*入/ }));
+
+    await waitFor(() => {
+      expect(restoreMock).toHaveBeenCalledTimes(1);
+      expect(loadMock).toHaveBeenCalledTimes(2);
+    });
+
+    expect(setFile).toHaveBeenCalledTimes(1);
+    expect(setCurrentDocumentId).toHaveBeenCalledWith('doc-1');
+    expect(setCurrentDocumentVersion).toHaveBeenCalledWith('V1.0.3');
+    expect(setInitialCheckedKeys).toHaveBeenCalledWith(['k1', 'k2']);
+  });
+
+  it('首次载入非 KEY_NOT_READY 错误时也会先尝试 key-restore 后再重试一次', async () => {
+    const user = userEvent.setup();
+    const loader = vi.fn().mockResolvedValue([
+      {
+        id: 'doc-1',
+        name: '测试文档',
+        size: 1024,
+        createdAt: '2025-01-01T00:00:00Z',
+        updatedAt: '2025-01-02T00:00:00Z',
+      },
+    ]);
+
+    const loadMock = documentService.loadPersonalDocument as unknown as MockFn;
+    loadMock
+      .mockRejectedValueOnce(new Error('R2 download failed'))
+      .mockResolvedValueOnce({
+        file: new File(['test'], 'loaded.docx', {
+          type: 'application/vnd.openxmlformats-officedocument.wordprocessingml.document',
+        }),
+        version: 'V1.0.3',
+        remark: '最新备注',
+        selectedKeys: ['k1', 'k2'],
+      });
+
+    const ensureMock = vi.mocked(cryptoKeyService.ensureUserKeyPair);
+    ensureMock.mockResolvedValue(undefined);
+    const restoreMock = vi.mocked(cryptoKeyService.restoreUserPrivateKey);
+    restoreMock.mockResolvedValueOnce(null);
+
+    render(<PersonalDocumentList open loader={loader} />);
+
+    await waitFor(() => {
+      expect(screen.getByText('测试文档')).toBeTruthy();
+    });
+
+    await user.click(screen.getByRole('button', { name: /载.*入/ }));
+
+    await waitFor(() => {
+      expect(restoreMock).toHaveBeenCalledTimes(1);
+      expect(loadMock).toHaveBeenCalledTimes(2);
+    });
+
+    expect(setFile).toHaveBeenCalledTimes(1);
+    expect(setCurrentDocumentId).toHaveBeenCalledWith('doc-1');
+    expect(setCurrentDocumentVersion).toHaveBeenCalledWith('V1.0.3');
+    expect(setInitialCheckedKeys).toHaveBeenCalledWith(['k1', 'k2']);
+  });
+
+  it('重试后仍失败时提示具体错误并打印异常栈', async () => {
+    const user = userEvent.setup();
+    const loader = vi.fn().mockResolvedValue([
+      {
+        id: 'doc-1',
+        name: '测试文档',
+        size: 1024,
+        createdAt: '2025-01-01T00:00:00Z',
+        updatedAt: '2025-01-02T00:00:00Z',
+      },
+    ]);
+
+    const loadMock = documentService.loadPersonalDocument as unknown as MockFn;
+    loadMock
+      .mockRejectedValueOnce(new Error('R2 download failed: 403 Forbidden'))
+      .mockRejectedValueOnce(new Error('R2 download failed: 403 Forbidden'));
+
+    const ensureMock = vi.mocked(cryptoKeyService.ensureUserKeyPair);
+    ensureMock.mockResolvedValue(undefined);
+    const restoreMock = vi.mocked(cryptoKeyService.restoreUserPrivateKey);
+    restoreMock.mockResolvedValueOnce(null);
+
+    const messageErrorSpy = vi.spyOn(message, 'error').mockImplementation(() => {
+      return undefined as any;
+    });
+    const consoleErrorSpy = vi.spyOn(console, 'error').mockImplementation(() => {
+      return undefined;
+    });
+
+    render(<PersonalDocumentList open loader={loader} />);
+
+    await waitFor(() => {
+      expect(screen.getByText('测试文档')).toBeTruthy();
+    });
+
+    await user.click(screen.getByRole('button', { name: /载.*入/ }));
+
+    await waitFor(() => {
+      expect(loadMock).toHaveBeenCalledTimes(2);
+      expect(restoreMock).toHaveBeenCalledTimes(1);
+    });
+
+    expect(messageErrorSpy).toHaveBeenCalledWith('载入文档失败：R2 download failed: 403 Forbidden');
+    expect(consoleErrorSpy).toHaveBeenCalled();
+
+    messageErrorSpy.mockRestore();
+    consoleErrorSpy.mockRestore();
   });
 
   it('版本下拉条目中展示版本大小', async () => {

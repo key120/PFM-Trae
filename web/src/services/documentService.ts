@@ -11,6 +11,8 @@ import {
   isWebCryptoAvailable,
   distributeDocumentKey,
   revokeDocumentKeyAccess,
+  backupUserPrivateKey,
+  restoreUserPrivateKey,
 } from './cryptoKeyService';
 import { generateDocumentId, generateVersionId } from '../utils/idGenerator';
 
@@ -55,6 +57,7 @@ export interface DocumentVersionRow {
   r2_key: string;
   content_hash: string;
   encrypted_meta: Record<string, unknown> | null;
+  key_version: number;
   size_bytes: number;
   created_at: string;
 }
@@ -98,6 +101,14 @@ interface LoadedPersonalDocument {
   version: string | null;
   remark: string | null;
   selectedKeys?: string[];
+}
+
+interface KeyNotReadyError extends Error {
+  code: 'KEY_NOT_READY';
+}
+
+function createKeyNotReadyError(message: string): KeyNotReadyError {
+  return Object.assign(new Error(message), { code: 'KEY_NOT_READY' as const });
 }
 
 export async function fetchPersonalDocuments(userId: string): Promise<PersonalDocument[]> {
@@ -171,6 +182,21 @@ export async function savePersonalDocument(
   if (!keyPair) {
     throw new Error('未找到用户密钥，请重新登录后重试');
   }
+
+  // 提前计算本次 key_version：供 document_keys 写入与私钥备份版本保持一致。
+  const { data: existingKeyData } = await supabase
+    .from('document_keys')
+    .select('key_version')
+    .eq('document_id', documentId)
+    .eq('user_id', input.userId)
+    .order('key_version', { ascending: false })
+    .limit(1)
+    .maybeSingle();
+
+  const nextKeyVersion = existingKeyData ? (existingKeyData.key_version as number) + 1 : 1;
+
+  // 每次保存时尝试备份私钥，保证跨浏览器可恢复。
+  await backupUserPrivateKey(keyPair.privateKey, nextKeyVersion);
 
   // Step 3：生成本次版本的 DocumentKey（AES-GCM-256）
   const documentKey = await generateDocumentKey();
@@ -285,7 +311,9 @@ export async function savePersonalDocument(
     encrypted_meta: {
       title: input.fileName,
       selectedKeys: input.selectedKeys,
+      keyVersion: nextKeyVersion,
     },
+    key_version: nextKeyVersion,
     size_bytes: size,
   });
 
@@ -294,18 +322,6 @@ export async function savePersonalDocument(
   }
 
   // Step 9：写入 document_keys 表（owner 的 wrapped key，确保自己也能解密）
-  // 查询当前最大 key_version，递增后写入，避免主键冲突
-  const { data: existingKeyData } = await supabase
-    .from('document_keys')
-    .select('key_version')
-    .eq('document_id', documentId)
-    .eq('user_id', input.userId)
-    .order('key_version', { ascending: false })
-    .limit(1)
-    .maybeSingle();
-
-  const nextKeyVersion = existingKeyData ? (existingKeyData.key_version as number) + 1 : 1;
-
   const { error: keyError } = await supabase.from('document_keys').insert({
     document_id: documentId,
     user_id: input.userId,
@@ -439,7 +455,7 @@ export async function loadPersonalDocument(
     // 获取最新版本记录（取 created_at 最新的一条）
     const { data: versionData, error: versionError } = await supabase
       .from('document_versions')
-      .select('id, r2_key, content_hash, encrypted_meta, version_label, note')
+      .select('id, r2_key, content_hash, encrypted_meta, version_label, note, key_version')
       .eq('document_id', documentId)
       .order('created_at', { ascending: false })
       .limit(1)
@@ -449,30 +465,92 @@ export async function loadPersonalDocument(
       throw versionError || new Error('Failed to load document version');
     }
 
-    // 获取当前用户的 wrapped_document_key
-    const { data: keyData, error: keyError } = await supabase
-      .from('document_keys')
-      .select('wrapped_document_key')
-      .eq('document_id', documentId)
-      .eq('user_id', userId)
-      .order('key_version', { ascending: false })
-      .limit(1)
-      .single();
+    // 先按当前版本的 key_version 精确获取 wrapped key，确保版本与密钥一一对应
+    const versionKeyVersion =
+      typeof (versionData as { key_version?: unknown }).key_version === 'number'
+        ? ((versionData as { key_version: number }).key_version)
+        : null;
 
-    if (keyError || !keyData) {
-      throw new Error('无法找到解密密钥，请确认您有权限访问此文档');
+    let keyRows: Array<{ wrapped_document_key: string; key_version: number }> = [];
+
+    if (versionKeyVersion !== null) {
+      try {
+        const { data: exactKeyData, error: exactKeyError } = await supabase
+          .from('document_keys')
+          .select('wrapped_document_key, key_version')
+          .eq('document_id', documentId)
+          .eq('user_id', userId)
+          .eq('key_version', versionKeyVersion)
+          .limit(1);
+
+        if (exactKeyError) {
+          throw createKeyNotReadyError('无法找到版本对应的解密密钥，请确认您有权限访问此文档');
+        }
+
+        if (exactKeyData && exactKeyData.length > 0) {
+          keyRows = exactKeyData as Array<{ wrapped_document_key: string; key_version: number }>;
+        }
+      } catch {
+        // 测试桩或异常链路下回退到通用 key 回退查询
+      }
     }
 
-    // 获取用户私钥并解封 DocumentKey
-    const keyPair = await getUserKeyPair(userId);
+    // 若版本精确匹配为空，再回退按 key_version 倒序取最近几条（容错兜底）
+    if (keyRows.length === 0) {
+      const { data: fallbackKeyRows, error: fallbackKeyError } = await supabase
+        .from('document_keys')
+        .select('wrapped_document_key, key_version')
+        .eq('document_id', documentId)
+        .eq('user_id', userId)
+        .order('key_version', { ascending: false })
+        .limit(5);
+
+      if (fallbackKeyError || !fallbackKeyRows || fallbackKeyRows.length === 0) {
+        throw createKeyNotReadyError('无法找到解密密钥，请确认您有权限访问此文档');
+      }
+
+      keyRows = fallbackKeyRows as Array<{ wrapped_document_key: string; key_version: number }>;
+    }
+
+    // 获取用户私钥并解封 DocumentKey（若本地缺失则尝试先恢复）
+    let keyPair = await getUserKeyPair(userId);
     if (!keyPair) {
-      throw new Error('未找到用户密钥，请重新登录后重试');
+      await restoreUserPrivateKey();
+      keyPair = await getUserKeyPair(userId);
+    }
+    if (!keyPair) {
+      throw createKeyNotReadyError('未找到用户密钥，请重新登录后重试');
     }
 
-    const documentKey = await unwrapDocumentKey(
-      (keyData as { wrapped_document_key: string }).wrapped_document_key,
-      keyPair.privateKey,
-    );
+    let documentKey: CryptoKey | null = null;
+    for (const row of keyRows as Array<{ wrapped_document_key: string; key_version: number }>) {
+      try {
+        documentKey = await unwrapDocumentKey(row.wrapped_document_key, keyPair.privateKey);
+        break;
+      } catch {
+        // 本地私钥可能已过期，仅尝试恢复最新私钥后继续回退 key
+        const restoredLatest = await restoreUserPrivateKey();
+        if (!restoredLatest) {
+          continue;
+        }
+
+        keyPair = {
+          ...keyPair,
+          privateKey: restoredLatest,
+        };
+
+        try {
+          documentKey = await unwrapDocumentKey(row.wrapped_document_key, restoredLatest);
+          break;
+        } catch {
+          // 继续尝试回退 key
+        }
+      }
+    }
+
+    if (!documentKey) {
+      throw createKeyNotReadyError('解密密钥不可用，请重新初始化密钥后重试');
+    }
 
     // 从 R2 下载密文 Blob
     const encryptedBlob = await downloadFromR2(documentId, versionData.id as string);

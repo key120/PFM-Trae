@@ -1,9 +1,12 @@
 import React, { useState } from 'react';
 import { Outlet, useNavigate } from 'react-router-dom';
-import { Layout, Dropdown, Avatar, Typography, Button, Drawer, Space, Tabs } from 'antd';
+import { Layout, Dropdown, Avatar, Typography, Button, Drawer, Space, Tabs, Modal, Form, Input, message } from 'antd';
 import { UserOutlined, LogoutOutlined, UnorderedListOutlined } from '@ant-design/icons';
 import type { MenuProps } from 'antd';
 import { useAuthStore } from '../store/useAuthStore';
+import { useTeamStore } from '../store/useTeamStore';
+import { createTeam } from '../services/teamService';
+import TeamInfoModal from '../components/TeamInfoModal';
 import PersonalDocumentList from '../components/PersonalDocumentList';
 
 const { Header, Content } = Layout;
@@ -11,9 +14,14 @@ const { Text } = Typography;
 
 const MainLayout: React.FC = () => {
   const { user, signOut } = useAuthStore();
+  const { teams, currentTeamId, setCurrentTeamId, setTeams } = useTeamStore();
   const navigate = useNavigate();
   const [docDrawerOpen, setDocDrawerOpen] = useState(false);
   const [docTabKey, setDocTabKey] = useState('personal');
+  const [createTeamOpen, setCreateTeamOpen] = useState(false);
+  const [createTeamLoading, setCreateTeamLoading] = useState(false);
+  const [teamInfoOpen, setTeamInfoOpen] = useState(false);
+  const [teamForm] = Form.useForm<{ teamName: string }>();
 
   const handleLogout = async () => {
     await signOut();
@@ -25,12 +33,85 @@ const MainLayout: React.FC = () => {
     setDocDrawerOpen(true);
   };
 
+  const handleOpenCreateTeam = () => {
+    teamForm.setFieldsValue({ teamName: '' });
+    setCreateTeamOpen(true);
+  };
+
+  const handleOpenTeamInfo = () => {
+    if (!hasTeams) {
+      return;
+    }
+    setTeamInfoOpen(true);
+  };
+
+  const handleCloseTeamInfo = () => {
+    setTeamInfoOpen(false);
+  };
+
+  const handleCancelCreateTeam = () => {
+    setCreateTeamOpen(false);
+  };
+
+  const handleConfirmCreateTeam = async () => {
+    try {
+      const { teamName } = await teamForm.validateFields();
+      if (!user?.id) {
+        return;
+      }
+
+      setCreateTeamLoading(true);
+      try {
+        const createdTeam = await createTeam({
+          userId: user.id,
+          teamName,
+        });
+        setTeams([...teams, createdTeam]);
+        setCurrentTeamId(createdTeam.id);
+        setCreateTeamOpen(false);
+      } catch (error) {
+        const errorMessage = error instanceof Error ? error.message : '创建团队失败';
+        message.error(errorMessage);
+      } finally {
+        setCreateTeamLoading(false);
+      }
+    } catch {
+    }
+  };
+
+  const hasTeams = teams.length > 0;
+  const switchTeamChildren: MenuProps['items'] = teams.map((team) => ({
+    key: `switch-team-${team.id}`,
+    label: team.id === currentTeamId ? `${team.name} ✓` : team.name,
+    onClick: () => setCurrentTeamId(team.id),
+  }));
+
   const items: MenuProps['items'] = [
     {
       key: 'email',
       label: <Text>{user?.email}</Text>,
       disabled: true,
       style: { cursor: 'default', color: 'rgba(0, 0, 0, 0.88)' }
+    },
+    {
+      type: 'divider',
+    },
+    {
+      key: 'create-team',
+      label: '新建团队',
+      onClick: handleOpenCreateTeam,
+    },
+    {
+      key: 'team-info',
+      label: '团队信息',
+      disabled: !hasTeams,
+      onClick: handleOpenTeamInfo,
+    },
+    {
+      key: 'switch-team',
+      label: '切换团队',
+      disabled: !hasTeams,
+      children: switchTeamChildren,
     },
     {
       type: 'divider',
@@ -111,6 +192,32 @@ const MainLayout: React.FC = () => {
                 ]}
               />
             </Drawer>
+
+            <Modal
+              open={createTeamOpen}
+              title="新建团队"
+              onOk={handleConfirmCreateTeam}
+              onCancel={handleCancelCreateTeam}
+              confirmLoading={createTeamLoading}
+              okText="确定"
+              cancelText="取消"
+            >
+              <Form form={teamForm} layout="vertical">
+                <Form.Item
+                  label="团队名称"
+                  name="teamName"
+                  rules={[{ required: true, message: '请输入团队名称' }]}
+                >
+                  <Input placeholder="请输入团队名称" />
+                </Form.Item>
+              </Form>
+            </Modal>
+
+            <TeamInfoModal
+              open={teamInfoOpen}
+              teamId={currentTeamId}
+              onClose={handleCloseTeamInfo}
+            />
           </>
         )}
       </Header>

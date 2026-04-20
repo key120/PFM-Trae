@@ -94,12 +94,15 @@ const upsertUserPublicKey = async (user: User, publicJwk: JsonWebKey): Promise<v
   }
 };
 
-export const backupUserPrivateKey = async (privateKey: CryptoKey): Promise<void> => {
+export const backupUserPrivateKey = async (
+  privateKey: CryptoKey,
+  keyVersion: number = 1,
+): Promise<void> => {
   if (!isWebCryptoAvailable()) return;
   try {
     const privateKeyJwk = await crypto.subtle.exportKey('jwk', privateKey);
     const { error } = await supabase.functions.invoke('key-backup', {
-      body: { privateKeyJwk, keyVersion: 1 },
+      body: { privateKeyJwk, keyVersion },
     });
     if (error) {
       // 静默失败，不阻断主流程
@@ -109,20 +112,21 @@ export const backupUserPrivateKey = async (privateKey: CryptoKey): Promise<void>
   }
 };
 
-export const restoreUserPrivateKey = async (): Promise<CryptoKey | null> => {
+export const restoreUserPrivateKey = async (keyVersion?: number): Promise<CryptoKey | null> => {
   if (!isWebCryptoAvailable()) return null;
   try {
-    const { data, error } = await supabase.functions.invoke('key-restore', { body: {} });
+    const body = typeof keyVersion === 'number' ? { keyVersion } : {};
+    const { data, error } = await supabase.functions.invoke('key-restore', { body });
     if (error || !data?.privateKeyJwk) return null;
 
     const jwk = data.privateKeyJwk as JsonWebKey;
-    if (!jwk.kty || !jwk.alg) return null;
+    if (!jwk.kty) return null;
 
     const privateKey = await crypto.subtle.importKey(
       'jwk',
       jwk,
       { name: 'RSA-OAEP', hash: 'SHA-256' },
-      false,
+      true,
       ['decrypt'],
     );
 
@@ -133,6 +137,8 @@ export const restoreUserPrivateKey = async (): Promise<CryptoKey | null> => {
     delete publicJwk.p;
     delete publicJwk.q;
     delete publicJwk.qi;
+    delete publicJwk.key_ops;
+    publicJwk.key_ops = ['encrypt'];
 
     const publicKey = await crypto.subtle.importKey(
       'jwk',
