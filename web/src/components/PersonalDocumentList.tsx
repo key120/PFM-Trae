@@ -1,14 +1,29 @@
-import React, { useEffect, useState } from 'react';
-import { Alert, Button, Card, Dropdown, Empty, Skeleton, Tag, Typography, message, Modal } from 'antd';
+import React, { useEffect, useMemo, useState } from 'react';
+import { Alert, Button, Card, Dropdown, Empty, Skeleton, Tag, Typography, message, Modal, Checkbox, Divider, Space } from 'antd';
 import { useAuthStore } from '../store/useAuthStore';
 import { useDocStore } from '../store/useDocStore';
-import { fetchPersonalDocuments, loadPersonalDocument, PersonalDocument } from '../services/documentService';
+import { useTeamStore } from '../store/useTeamStore';
+import {
+  fetchPersonalDocuments,
+  isDocumentSharedInTeam,
+  loadPersonalDocument,
+  PersonalDocument,
+  shareDocument,
+  unshareDocument,
+} from '../services/documentService';
 import { ensureUserKeyPair, restoreUserPrivateKey } from '../services/cryptoKeyService';
+import { fetchTeamGroups, fetchTeamMembers, TeamGroupSummary, TeamMemberSummary } from '../services/teamService';
 
 interface PersonalDocumentListProps {
   open: boolean;
   loader?: (userId: string) => Promise<PersonalDocument[]>;
   onLoaded?: () => void;
+}
+
+interface SelectedGroupNode {
+  groupId: string;
+  groupName: string;
+  members: TeamMemberSummary[];
 }
 
 const formatDateTime = (value: string) => {
@@ -31,13 +46,19 @@ const formatSize = (value: number | null | undefined) => {
 
 const PersonalDocumentList: React.FC<PersonalDocumentListProps> = ({ open, loader = fetchPersonalDocuments, onLoaded }) => {
   const { user } = useAuthStore();
+  const { currentTeamId } = useTeamStore();
   const { setFile, setCurrentDocumentId, setCurrentDocumentVersion, setInitialCheckedKeys } = useDocStore();
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [documents, setDocuments] = useState<PersonalDocument[]>([]);
   const [loadingDocumentId, setLoadingDocumentId] = useState<string | null>(null);
   const [shareModalDoc, setShareModalDoc] = useState<PersonalDocument | null>(null);
-  const [sharedDocumentIds, setSharedDocumentIds] = useState<Set<string>>(() => new Set());
+  const [shareStatusByDocId, setShareStatusByDocId] = useState<Record<string, boolean>>({});
+  const [shareTargetLoading, setShareTargetLoading] = useState(false);
+  const [shareTargetError, setShareTargetError] = useState<string | null>(null);
+  const [teamGroups, setTeamGroups] = useState<TeamGroupSummary[]>([]);
+  const [teamMembers, setTeamMembers] = useState<TeamMemberSummary[]>([]);
+  const [selectedMemberIds, setSelectedMemberIds] = useState<string[]>([]);
 
   useEffect(() => {
     if (!open || !user) {
@@ -55,6 +76,22 @@ const PersonalDocumentList: React.FC<PersonalDocumentListProps> = ({ open, loade
           return;
         }
         setDocuments(list);
+
+        const entries = await Promise.all(
+          list.map(async (doc) => {
+            if (!currentTeamId) {
+              return [doc.id, false] as const;
+            }
+            const shared = await isDocumentSharedInTeam(doc.id, currentTeamId);
+            return [doc.id, shared] as const;
+          }),
+        );
+
+        if (!active) {
+          return;
+        }
+
+        setShareStatusByDocId(Object.fromEntries(entries));
       } catch (e: unknown) {
         if (!active) {
           return;
@@ -83,7 +120,7 @@ const PersonalDocumentList: React.FC<PersonalDocumentListProps> = ({ open, loade
       active = false;
       window.removeEventListener('personalDocumentsChanged', handleChanged);
     };
-  }, [open, user, loader]);
+  }, [open, user, loader, currentTeamId]);
 
   const handleRetry = () => {
     if (!user) {
@@ -94,8 +131,18 @@ const PersonalDocumentList: React.FC<PersonalDocumentListProps> = ({ open, loade
     setError(null);
 
     loader(user.id)
-      .then((list) => {
+      .then(async (list) => {
         setDocuments(list);
+        const entries = await Promise.all(
+          list.map(async (doc) => {
+            if (!currentTeamId) {
+              return [doc.id, false] as const;
+            }
+            const shared = await isDocumentSharedInTeam(doc.id, currentTeamId);
+            return [doc.id, shared] as const;
+          }),
+        );
+        setShareStatusByDocId(Object.fromEntries(entries));
       })
       .catch((e: unknown) => {
         const message =
@@ -107,29 +154,226 @@ const PersonalDocumentList: React.FC<PersonalDocumentListProps> = ({ open, loade
       });
   };
 
-  const handleOpenShare = (item: PersonalDocument) => {
-    setShareModalDoc(item);
-    setSharedDocumentIds((prev) => {
-      if (prev.has(item.id)) {
-        return prev;
+
+  const membersByGroupId = useMemo(() => {
+    const map: Record<string, TeamMemberSummary[]> = {};
+    teamMembers.forEach((member) => {
+      if (!member.groupId) {
+        return;
       }
+      if (!map[member.groupId]) {
+        map[member.groupId] = [];
+      }
+      map[member.groupId].push(member);
+    });
+    return map;
+  }, [teamMembers]);
+
+  const ungroupedMembers = useMemo(
+    () => teamMembers.filter((member) => !member.groupId),
+    [teamMembers],
+  );
+
+  const memberById = useMemo(() => {
+    const map = new Map<string, TeamMemberSummary>();
+    teamMembers.forEach((member) => {
+      map.set(member.id, member);
+    });
+    return map;
+  }, [teamMembers]);
+
+  const memberIdsByGroupId = useMemo(() => {
+    const map: Record<string, string[]> = {};
+    teamGroups.forEach((group) => {
+      map[group.id] = (membersByGroupId[group.id] ?? []).map((member) => member.id);
+    });
+    return map;
+  }, [membersByGroupId, teamGroups]);
+
+  const selectedMemberIdSet = useMemo(() => new Set(selectedMemberIds), [selectedMemberIds]);
+
+  const selectedUserMap = useMemo(() => {
+    const map = new Map<string, TeamMemberSummary>();
+    selectedMemberIds.forEach((memberId) => {
+      const member = memberById.get(memberId);
+      if (member && member.userId) {
+        map.set(member.userId, member);
+      }
+    });
+    return map;
+  }, [memberById, selectedMemberIds]);
+
+  const selectedGroupedNodes = useMemo<SelectedGroupNode[]>(() => {
+    return teamGroups
+      .map((group) => {
+        const members = (membersByGroupId[group.id] ?? []).filter((member) => selectedMemberIdSet.has(member.id));
+        return {
+          groupId: group.id,
+          groupName: group.name,
+          members,
+        };
+      })
+      .filter((node) => node.members.length > 0);
+  }, [membersByGroupId, selectedMemberIdSet, teamGroups]);
+
+  const selectedUngroupedMembers = useMemo(
+    () => ungroupedMembers.filter((member) => selectedMemberIdSet.has(member.id)),
+    [selectedMemberIdSet, ungroupedMembers],
+  );
+
+  const isGroupChecked = (groupId: string) => {
+    const memberIds = memberIdsByGroupId[groupId] ?? [];
+    if (memberIds.length === 0) {
+      return false;
+    }
+    return memberIds.every((id) => selectedMemberIdSet.has(id));
+  };
+
+  const isGroupIndeterminate = (groupId: string) => {
+    const memberIds = memberIdsByGroupId[groupId] ?? [];
+    if (memberIds.length === 0) {
+      return false;
+    }
+    const selectedCount = memberIds.filter((id) => selectedMemberIdSet.has(id)).length;
+    return selectedCount > 0 && selectedCount < memberIds.length;
+  };
+
+  const getMemberBaseLabel = (member: TeamMemberSummary) => member.name || member.email || member.id;
+
+  const handleOpenShare = async (item: PersonalDocument) => {
+    setShareModalDoc(item);
+    setSelectedMemberIds([]);
+
+    if (!user) {
+      return;
+    }
+
+    if (!currentTeamId) {
+      setTeamGroups([]);
+      setTeamMembers([]);
+      setShareTargetError('请先选择团队后再共享文档');
+      return;
+    }
+
+    setShareTargetLoading(true);
+    setShareTargetError(null);
+    try {
+      const [groups, members] = await Promise.all([
+        fetchTeamGroups(currentTeamId),
+        fetchTeamMembers(currentTeamId),
+      ]);
+      setTeamGroups(groups);
+      setTeamMembers(members.filter((member) => member.userId !== user.id));
+    } catch (e) {
+      const errorMessage = e instanceof Error && e.message ? e.message : '加载共享目标失败';
+      setShareTargetError(errorMessage);
+      setTeamGroups([]);
+      setTeamMembers([]);
+    } finally {
+      setShareTargetLoading(false);
+    }
+  };
+
+  const handleCloseShareModal = () => {
+    setShareModalDoc(null);
+    setShareTargetError(null);
+    setSelectedMemberIds([]);
+  };
+
+  const toggleGroup = (groupId: string, checked: boolean) => {
+    const groupMemberIds = memberIdsByGroupId[groupId] ?? [];
+    setSelectedMemberIds((prev) => {
       const next = new Set(prev);
-      next.add(item.id);
-      return next;
+      if (checked) {
+        groupMemberIds.forEach((id) => next.add(id));
+      } else {
+        groupMemberIds.forEach((id) => next.delete(id));
+      }
+      return Array.from(next);
     });
   };
 
-  const handleCancelShare = (item: PersonalDocument) => {
-    setSharedDocumentIds((prev) => {
-      if (!prev.has(item.id)) {
-        return prev;
+  const toggleMember = (memberId: string, checked: boolean) => {
+    setSelectedMemberIds((prev) => {
+      if (checked) {
+        if (prev.includes(memberId)) {
+          return prev;
+        }
+        return [...prev, memberId];
       }
-      const next = new Set(prev);
-      next.delete(item.id);
-      return next;
+      return prev.filter((id) => id !== memberId);
     });
-    if (shareModalDoc && shareModalDoc.id === item.id) {
-      setShareModalDoc(null);
+  };
+
+  const handleConfirmShare = async () => {
+    if (!shareModalDoc || !user || !currentTeamId) {
+      return;
+    }
+
+    const selectedMemberIdSetForSubmit = new Set(selectedMemberIds);
+    const expandedUserIds = Array.from(new Set(
+      teamMembers
+        .filter((member) => selectedMemberIdSetForSubmit.has(member.id))
+        .map((member) => member.userId)
+        .filter((userId): userId is string => Boolean(userId)),
+    ));
+
+    try {
+      const result = await shareDocument({
+        documentId: shareModalDoc.id,
+        ownerUserId: user.id,
+        targetUserIds: expandedUserIds,
+        teamId: currentTeamId,
+      });
+
+      if (result.failed.length > 0) {
+        message.warning(`部分成员共享失败（${result.failed.length}）`);
+      } else {
+        message.success('共享成功');
+      }
+
+      setShareStatusByDocId((prev) => ({
+        ...prev,
+        [shareModalDoc.id]: result.distributed.length > 0,
+      }));
+      handleCloseShareModal();
+    } catch (err) {
+      const errMsg = err instanceof Error ? err.message : '共享失败';
+      message.error(`共享失败: ${errMsg}`);
+    }
+  };
+
+  const handleCancelShare = async (item: PersonalDocument) => {
+    if (!currentTeamId) {
+      return;
+    }
+
+    try {
+      const members = await fetchTeamMembers(currentTeamId);
+      const memberUserIds = Array.from(new Set(
+        members
+          .map((member) => member.userId)
+          .filter((userId): userId is string => Boolean(userId) && userId !== user?.id),
+      ));
+
+      Modal.confirm({
+        title: '确认取消共享',
+        content: '将撤销当前团队全部共享成员的访问权限，是否继续？',
+        onOk: async () => {
+          await unshareDocument(item.id, memberUserIds, currentTeamId);
+          setShareStatusByDocId((prev) => ({
+            ...prev,
+            [item.id]: false,
+          }));
+          message.success('已取消当前团队共享');
+          if (shareModalDoc && shareModalDoc.id === item.id) {
+            handleCloseShareModal();
+          }
+        },
+      });
+    } catch (error) {
+      const errorMessage = error instanceof Error && error.message ? error.message : '取消共享失败';
+      message.error(errorMessage);
     }
   };
 
@@ -164,8 +408,6 @@ const PersonalDocumentList: React.FC<PersonalDocumentListProps> = ({ open, loade
             ? (error as { code?: string }).code
             : undefined;
 
-        // 首次载入失败时，主动尝试一次远端私钥恢复并重试。
-        // 这样即便错误未携带 KEY_NOT_READY，也不会漏掉 key-restore 触发机会。
         await restoreUserPrivateKey();
         await ensureUserKeyPair(user);
 
@@ -236,7 +478,7 @@ const PersonalDocumentList: React.FC<PersonalDocumentListProps> = ({ open, loade
         const size = item.size;
 
         const versions = Array.isArray(item.versions) ? item.versions : [];
-        const isShared = sharedDocumentIds.has(item.id);
+        const isShared = Boolean(shareStatusByDocId[item.id]);
 
         return (
           <Card
@@ -342,18 +584,109 @@ const PersonalDocumentList: React.FC<PersonalDocumentListProps> = ({ open, loade
       <Modal
         open={!!shareModalDoc}
         title="共享设置"
-        onCancel={() => setShareModalDoc(null)}
-        footer={
-          <Button onClick={() => setShareModalDoc(null)}>
-            关闭
-          </Button>
-        }
+        onCancel={handleCloseShareModal}
+        onOk={() => {
+          void handleConfirmShare();
+        }}
+        okText="确认共享"
+        cancelText="关闭"
         maskClosable
         centered
       >
-        <Typography.Paragraph type="secondary">
-          共享设置功能开发中，当前仅提供入口与状态切换。
-        </Typography.Paragraph>
+        {shareTargetError ? (
+          <Alert type="error" showIcon message={shareTargetError} />
+        ) : (
+          <div
+            style={{
+              display: 'grid',
+              gridTemplateColumns: '1fr 1fr',
+              gap: 16,
+            }}
+          >
+            <div>
+              <Typography.Text strong>可选目标</Typography.Text>
+              <Divider style={{ margin: '8px 0' }} />
+              {shareTargetLoading ? (
+                <Skeleton active paragraph={{ rows: 4 }} />
+              ) : (
+                <Space orientation="vertical" size={8} style={{ width: '100%' }}>
+                  {teamGroups.map((group) => (
+                    <div key={group.id}>
+                      <Checkbox
+                        checked={isGroupChecked(group.id)}
+                        indeterminate={isGroupIndeterminate(group.id)}
+                        onChange={(e) => toggleGroup(group.id, e.target.checked)}
+                      >
+                        {group.name}
+                      </Checkbox>
+                      {(membersByGroupId[group.id] ?? []).length > 0 && (
+                        <div style={{ marginLeft: 24, marginTop: 6 }}>
+                          <Space orientation="vertical" size={6}>
+                            {(membersByGroupId[group.id] ?? []).map((member) => (
+                              <Checkbox
+                                key={member.id}
+                                checked={selectedMemberIdSet.has(member.id)}
+                                onChange={(e) => toggleMember(member.id, e.target.checked)}
+                              >
+                                {getMemberBaseLabel(member)}
+                              </Checkbox>
+                            ))}
+                          </Space>
+                        </div>
+                      )}
+                    </div>
+                  ))}
+
+                  {ungroupedMembers.length > 0 && (
+                    <div>
+                      <Typography.Text type="secondary">未分组成员</Typography.Text>
+                      <div style={{ marginTop: 6 }}>
+                        <Space orientation="vertical" size={6}>
+                          {ungroupedMembers.map((member) => (
+                            <Checkbox
+                              key={member.id}
+                              aria-label={member.name || member.email || member.id}
+                              checked={selectedMemberIdSet.has(member.id)}
+                              onChange={(e) => toggleMember(member.id, e.target.checked)}
+                            >
+                              {getMemberBaseLabel(member)}
+                            </Checkbox>
+                          ))}
+                        </Space>
+                      </div>
+                    </div>
+                  )}
+                </Space>
+              )}
+            </div>
+
+            <div>
+              <Typography.Text strong>已选目标</Typography.Text>
+              <Divider style={{ margin: '8px 0' }} />
+              {selectedUserMap.size === 0 ? (
+                <Typography.Text type="secondary">暂无已选目标</Typography.Text>
+              ) : (
+                <Space orientation="vertical" size={8} style={{ width: '100%' }}>
+                  {selectedGroupedNodes.map((node) => (
+                    <div key={node.groupId}>
+                      <Typography.Text>{node.groupName}</Typography.Text>
+                      <div style={{ marginLeft: 20, marginTop: 4 }}>
+                        <Space orientation="vertical" size={4}>
+                          {node.members.map((member) => (
+                            <span key={member.id}>{getMemberBaseLabel(member)}</span>
+                          ))}
+                        </Space>
+                      </div>
+                    </div>
+                  ))}
+                  {selectedUngroupedMembers.map((member) => (
+                    <span key={member.id}>{getMemberBaseLabel(member)}</span>
+                  ))}
+                </Space>
+              )}
+            </div>
+          </div>
+        )}
       </Modal>
     </div>
   );

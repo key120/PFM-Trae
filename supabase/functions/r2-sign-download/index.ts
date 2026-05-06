@@ -69,7 +69,6 @@ Deno.serve(async (req: Request) => {
     return new Response("Missing documentId or versionId", { status: 400, headers: corsHeaders });
   }
 
-  // 权限校验：当前用户必须是文档 owner（或后续扩展为共享成员）
   const { data: docData, error: docError } = await supabase
     .from("documents")
     .select("id, owner_id")
@@ -83,10 +82,20 @@ Deno.serve(async (req: Request) => {
     return new Response("Not Found", { status: 404, headers: corsHeaders });
   }
 
-  // 当前仅允许 owner 下载；后续接入共享成员时在此处扩展
   const isOwner = (docData as { owner_id: string }).owner_id === userId;
+
+  // 非所有者：检查是否有 document_keys（共享文档的访问凭证）
   if (!isOwner) {
-    return new Response("Forbidden", { status: 403, headers: corsHeaders });
+    const { data: keyData, error: keyError } = await supabase
+      .from("document_keys")
+      .select("document_id")
+      .eq("document_id", body.documentId)
+      .eq("user_id", userId)
+      .limit(1);
+
+    if (keyError || !keyData || keyData.length === 0) {
+      return new Response("Forbidden", { status: 403, headers: corsHeaders });
+    }
   }
 
   // 从 document_versions 获取 r2_key（RLS 已限制仅 owner 可见）

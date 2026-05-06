@@ -6,12 +6,20 @@ import MainLayout from './MainLayout';
 
 const mockSignOut = vi.fn();
 const mockCreateTeam = vi.fn();
+const mockFetchUserTeams = vi.fn();
+const mockFetchInvitationNotifications = vi.fn();
+const mockAcceptTeamInvitation = vi.fn();
+const mockRejectTeamInvitation = vi.fn();
 const mockTeamInfoModal = vi.fn();
+const mockStorageGetItem = vi.fn();
+const mockStorageSetItem = vi.fn();
+const mockAddTeam = vi.fn();
 const mockTeamState = {
   teams: [] as Array<{ id: string; name: string }>,
   currentTeamId: null as string | null,
   setCurrentTeamId: vi.fn(),
   setTeams: vi.fn(),
+  addTeam: mockAddTeam,
 };
 
 vi.mock('../store/useAuthStore', () => ({
@@ -27,6 +35,10 @@ vi.mock('../store/useTeamStore', () => ({
 
 vi.mock('../services/teamService', () => ({
   createTeam: (...args: unknown[]) => mockCreateTeam(...args),
+  fetchUserTeams: (...args: unknown[]) => mockFetchUserTeams(...args),
+  fetchInvitationNotifications: (...args: unknown[]) => mockFetchInvitationNotifications(...args),
+  acceptTeamInvitation: (...args: unknown[]) => mockAcceptTeamInvitation(...args),
+  rejectTeamInvitation: (...args: unknown[]) => mockRejectTeamInvitation(...args),
 }));
 
 vi.mock('../components/TeamInfoModal', () => ({
@@ -36,29 +48,47 @@ vi.mock('../components/TeamInfoModal', () => ({
   },
 }));
 
+const renderMainLayout = () => {
+  render(
+    <MemoryRouter initialEntries={['/']}>
+      <Routes>
+        <Route path="/" element={<MainLayout />}>
+          <Route index element={<div />} />
+        </Route>
+      </Routes>
+    </MemoryRouter>,
+  );
+};
+
+const resetMainLayoutMocks = () => {
+  mockSignOut.mockReset();
+  mockCreateTeam.mockReset();
+  mockFetchUserTeams.mockReset();
+  mockFetchInvitationNotifications.mockReset();
+  mockAcceptTeamInvitation.mockReset();
+  mockRejectTeamInvitation.mockReset();
+  mockTeamInfoModal.mockReset();
+  mockStorageGetItem.mockReset();
+  mockStorageSetItem.mockReset();
+  mockAddTeam.mockReset();
+  mockTeamState.teams = [];
+  mockTeamState.currentTeamId = null;
+  mockTeamState.setCurrentTeamId = vi.fn();
+  mockTeamState.setTeams = vi.fn();
+  mockTeamState.addTeam = mockAddTeam;
+  mockFetchUserTeams.mockResolvedValue([]);
+  mockFetchInvitationNotifications.mockResolvedValue([]);
+};
+
 describe('MainLayout 文档列表 Drawer', () => {
   beforeEach(() => {
-    mockSignOut.mockReset();
-    mockCreateTeam.mockReset();
-    mockTeamInfoModal.mockReset();
-    mockTeamState.teams = [];
-    mockTeamState.currentTeamId = null;
-    mockTeamState.setCurrentTeamId = vi.fn();
-    mockTeamState.setTeams = vi.fn();
+    resetMainLayoutMocks();
   });
 
   it('打开后展示个人/共享两个 Tabs，并默认加载个人文档列表', async () => {
     const user = userEvent.setup();
 
-    render(
-      <MemoryRouter initialEntries={['/']}>
-        <Routes>
-          <Route path="/" element={<MainLayout />}>
-            <Route index element={<div />} />
-          </Route>
-        </Routes>
-      </MemoryRouter>,
-    );
+    renderMainLayout();
 
     await user.click(screen.getByRole('button', { name: /文档列表/ }));
 
@@ -69,15 +99,7 @@ describe('MainLayout 文档列表 Drawer', () => {
   it('切换到共享 Tabs 后显示共享占位', async () => {
     const user = userEvent.setup();
 
-    render(
-      <MemoryRouter initialEntries={['/']}>
-        <Routes>
-          <Route path="/" element={<MainLayout />}>
-            <Route index element={<div />} />
-          </Route>
-        </Routes>
-      </MemoryRouter>,
-    );
+    renderMainLayout();
 
     await user.click(screen.getByRole('button', { name: /文档列表/ }));
     await user.click(await screen.findByRole('tab', { name: '共享文档' }));
@@ -86,29 +108,212 @@ describe('MainLayout 文档列表 Drawer', () => {
   });
 });
 
+describe('MainLayout 通知中心', () => {
+  beforeEach(() => {
+    resetMainLayoutMocks();
+  });
+
+  it('Bell 按钮显示未读红点并可打开通知抽屉', async () => {
+    const user = userEvent.setup();
+    mockFetchInvitationNotifications.mockResolvedValue([
+      {
+        type: 'team_invitation',
+        notificationId: 'notice-1',
+        invitationId: 'invite-1',
+        teamId: 'team-2',
+        teamName: '团队 B',
+        role: 'editor',
+        invitedBy: 'owner@example.com',
+        inviteeEmail: 'tester@example.com',
+        createdAt: '2026-04-23T10:00:00.000Z',
+        status: 'pending',
+        isRead: false,
+      },
+    ]);
+
+    renderMainLayout();
+
+    await waitFor(() => {
+      expect(mockFetchInvitationNotifications).toHaveBeenCalledWith('user-1', 'tester@example.com');
+    });
+
+    const bell = await screen.findByText('消息通知');
+    await user.click(bell);
+
+    expect(await screen.findByRole('dialog', { name: '消息通知' })).toBeTruthy();
+    expect(await screen.findByText('你被 owner@example.com 邀请加入 团队 B')).toBeTruthy();
+    expect(document.querySelector('.ant-badge-dot')).toBeTruthy();
+  });
+
+  it('已接受邀请保留原通知并显示已接受状态', async () => {
+    const user = userEvent.setup();
+    mockFetchInvitationNotifications.mockResolvedValue([
+      {
+        type: 'team_invitation',
+        notificationId: 'notice-1',
+        invitationId: 'invite-1',
+        teamId: 'team-2',
+        teamName: '团队 B',
+        role: 'editor',
+        invitedBy: 'owner@example.com',
+        inviteeEmail: 'tester@example.com',
+        createdAt: '2026-04-23T10:00:00.000Z',
+        status: 'accepted',
+        isRead: true,
+      },
+    ]);
+
+    renderMainLayout();
+
+    await user.click(await screen.findByText('消息通知'));
+
+    expect(await screen.findByText('你被 owner@example.com 邀请加入 团队 B')).toBeTruthy();
+    expect(screen.getByText('已接受')).toBeTruthy();
+    expect(screen.queryByRole('button', { name: /接\s*受/ })).toBeNull();
+    expect(screen.queryByRole('button', { name: /拒\s*绝/ })).toBeNull();
+  });
+
+  it('结果通知只显示纯结果文案', async () => {
+    const user = userEvent.setup();
+    mockFetchInvitationNotifications.mockResolvedValue([
+      {
+        type: 'team_invitation_result',
+        notificationId: 'notice-2',
+        inviteeEmail: 'yaobowen120@126.com',
+        result: 'rejected',
+        createdAt: '2026-04-23T12:00:00.000Z',
+        isRead: false,
+      },
+    ]);
+
+    renderMainLayout();
+
+    await user.click(await screen.findByText('消息通知'));
+
+    expect(await screen.findByText('yaobowen120@126.com 已拒绝邀请')).toBeTruthy();
+    expect(screen.queryByRole('button', { name: /接\s*受/ })).toBeNull();
+    expect(screen.queryByRole('button', { name: /拒\s*绝/ })).toBeNull();
+  });
+
+  it('接受邀请后本地保留通知并显示已接受', async () => {
+    const user = userEvent.setup();
+    mockFetchInvitationNotifications.mockResolvedValue([
+      {
+        type: 'team_invitation',
+        notificationId: 'notice-1',
+        invitationId: 'invite-1',
+        teamId: 'team-2',
+        teamName: '团队 B',
+        role: 'editor',
+        invitedBy: 'owner@example.com',
+        inviteeEmail: 'tester@example.com',
+        createdAt: '2026-04-23T10:00:00.000Z',
+        status: 'pending',
+        isRead: false,
+      },
+    ]);
+    mockFetchUserTeams
+      .mockResolvedValueOnce([{ id: 'team-1', name: '团队 A' }])
+      .mockResolvedValueOnce([
+        { id: 'team-1', name: '团队 A' },
+        { id: 'team-2', name: '团队 B' },
+      ]);
+
+    renderMainLayout();
+
+    await user.click(await screen.findByText('消息通知'));
+    await user.click(await screen.findByRole('button', { name: /接\s*受/ }));
+
+    await waitFor(() => {
+      expect(mockAcceptTeamInvitation).toHaveBeenCalledWith({ invitationId: 'invite-1' });
+    });
+    expect(await screen.findByText('已接受')).toBeTruthy();
+    expect(screen.getByText('你被 owner@example.com 邀请加入 团队 B')).toBeTruthy();
+  });
+
+  it('拒绝邀请后本地保留通知并显示已拒绝', async () => {
+    const user = userEvent.setup();
+    mockFetchInvitationNotifications.mockResolvedValue([
+      {
+        type: 'team_invitation',
+        notificationId: 'notice-1',
+        invitationId: 'invite-1',
+        teamId: 'team-2',
+        teamName: '团队 B',
+        role: 'editor',
+        invitedBy: 'owner@example.com',
+        inviteeEmail: 'tester@example.com',
+        createdAt: '2026-04-23T10:00:00.000Z',
+        status: 'pending',
+        isRead: false,
+      },
+    ]);
+
+    renderMainLayout();
+
+    await user.click(await screen.findByText('消息通知'));
+    await user.click(await screen.findByRole('button', { name: /拒\s*绝/ }));
+
+    await waitFor(() => {
+      expect(mockRejectTeamInvitation).toHaveBeenCalledWith({ invitationId: 'invite-1' });
+    });
+    expect(await screen.findByText('已拒绝')).toBeTruthy();
+    expect(screen.getByText('你被 owner@example.com 邀请加入 团队 B')).toBeTruthy();
+  });
+
+  it('已处理邀请不计入红点，但未读结果通知计入红点', async () => {
+    mockFetchInvitationNotifications.mockResolvedValue([
+      {
+        type: 'team_invitation',
+        notificationId: 'notice-1',
+        invitationId: 'invite-1',
+        teamId: 'team-2',
+        teamName: '团队 B',
+        role: 'editor',
+        invitedBy: 'owner@example.com',
+        inviteeEmail: 'tester@example.com',
+        createdAt: '2026-04-23T10:00:00.000Z',
+        status: 'accepted',
+        isRead: true,
+      },
+      {
+        type: 'team_invitation_result',
+        notificationId: 'notice-2',
+        inviteeEmail: 'yaobowen120@126.com',
+        result: 'accepted',
+        createdAt: '2026-04-23T12:00:00.000Z',
+        isRead: false,
+      },
+    ]);
+
+    renderMainLayout();
+
+    expect(await screen.findByText('消息通知')).toBeTruthy();
+    expect(document.querySelector('.ant-badge-dot')).toBeTruthy();
+  });
+});
+
 describe('MainLayout 团队菜单', () => {
   beforeEach(() => {
-    mockSignOut.mockReset();
-    mockCreateTeam.mockReset();
-    mockTeamInfoModal.mockReset();
-    mockTeamState.teams = [];
-    mockTeamState.currentTeamId = null;
-    mockTeamState.setCurrentTeamId = vi.fn();
-    mockTeamState.setTeams = vi.fn();
+    resetMainLayoutMocks();
+  });
+
+  it('初始化后会从后端加载当前用户团队列表', async () => {
+    mockFetchUserTeams.mockResolvedValue([{ id: 'team-1', name: '团队 A' }]);
+
+    renderMainLayout();
+
+    await waitFor(() => {
+      expect(mockFetchUserTeams).toHaveBeenCalledWith('user-1');
+    });
+
+    expect(mockTeamState.setTeams).toHaveBeenCalledWith([{ id: 'team-1', name: '团队 A' }]);
   });
 
   it('无团队时团队信息和切换团队为禁用状态', async () => {
     const user = userEvent.setup();
 
-    render(
-      <MemoryRouter initialEntries={['/']}>
-        <Routes>
-          <Route path="/" element={<MainLayout />}>
-            <Route index element={<div />} />
-          </Route>
-        </Routes>
-      </MemoryRouter>,
-    );
+    renderMainLayout();
 
     await user.click(screen.getByLabelText('user'));
 
@@ -129,15 +334,7 @@ describe('MainLayout 团队菜单', () => {
 
     const user = userEvent.setup();
 
-    render(
-      <MemoryRouter initialEntries={['/']}>
-        <Routes>
-          <Route path="/" element={<MainLayout />}>
-            <Route index element={<div />} />
-          </Route>
-        </Routes>
-      </MemoryRouter>,
-    );
+    renderMainLayout();
 
     await user.click(screen.getByLabelText('user'));
     await user.click(await screen.findByText('团队信息'));
@@ -150,7 +347,6 @@ describe('MainLayout 团队菜单', () => {
     });
   });
 
-
   it('有团队时展示切换团队二级菜单，并切换 currentTeamId', async () => {
     mockTeamState.teams = [
       { id: 'team-1', name: '团队 A' },
@@ -160,15 +356,7 @@ describe('MainLayout 团队菜单', () => {
 
     const user = userEvent.setup();
 
-    render(
-      <MemoryRouter initialEntries={['/']}>
-        <Routes>
-          <Route path="/" element={<MainLayout />}>
-            <Route index element={<div />} />
-          </Route>
-        </Routes>
-      </MemoryRouter>,
-    );
+    renderMainLayout();
 
     await user.click(screen.getByLabelText('user'));
     await user.hover(await screen.findByText('切换团队'));
@@ -180,18 +368,67 @@ describe('MainLayout 团队菜单', () => {
     expect(mockTeamState.setCurrentTeamId).toHaveBeenCalledWith('team-1');
   });
 
+  it('登录后如果存在上次选中的团队，会恢复该团队选择', async () => {
+    mockFetchUserTeams.mockResolvedValue([
+      { id: 'team-1', name: '团队 A' },
+      { id: 'team-2', name: '团队 B' },
+    ]);
+    mockStorageGetItem.mockReturnValue('team-2');
+
+    const localStorageSpy = vi.spyOn(window, 'localStorage', 'get').mockReturnValue({
+      getItem: mockStorageGetItem,
+      setItem: mockStorageSetItem,
+      removeItem: vi.fn(),
+      clear: vi.fn(),
+      key: vi.fn(),
+      length: 0,
+    } as Storage);
+
+    renderMainLayout();
+
+    await waitFor(() => {
+      expect(mockFetchUserTeams).toHaveBeenCalledWith('user-1');
+    });
+
+    await waitFor(() => {
+      expect(mockTeamState.setCurrentTeamId).toHaveBeenCalledWith('team-2');
+    });
+
+    expect(mockStorageGetItem).toHaveBeenCalledWith('pfm-current-team-id:user-1');
+    localStorageSpy.mockRestore();
+  });
+
+  it('currentTeamId 未变化时不重复写入 localStorage', async () => {
+    mockTeamState.currentTeamId = 'team-2';
+    mockFetchUserTeams.mockResolvedValue([
+      { id: 'team-1', name: '团队 A' },
+      { id: 'team-2', name: '团队 B' },
+    ]);
+    mockStorageGetItem.mockReturnValue('team-2');
+
+    const localStorageSpy = vi.spyOn(window, 'localStorage', 'get').mockReturnValue({
+      getItem: mockStorageGetItem,
+      setItem: mockStorageSetItem,
+      removeItem: vi.fn(),
+      clear: vi.fn(),
+      key: vi.fn(),
+      length: 0,
+    } as Storage);
+
+    renderMainLayout();
+
+    await waitFor(() => {
+      expect(mockFetchUserTeams).toHaveBeenCalledWith('user-1');
+    });
+
+    expect(mockStorageSetItem).not.toHaveBeenCalled();
+    localStorageSpy.mockRestore();
+  });
+
   it('点击新建团队后打开弹窗，取消时关闭弹窗', async () => {
     const user = userEvent.setup();
 
-    render(
-      <MemoryRouter initialEntries={['/']}>
-        <Routes>
-          <Route path="/" element={<MainLayout />}>
-            <Route index element={<div />} />
-          </Route>
-        </Routes>
-      </MemoryRouter>,
-    );
+    renderMainLayout();
 
     await user.click(screen.getByLabelText('user'));
     await user.click(await screen.findByText('新建团队'));
@@ -209,15 +446,7 @@ describe('MainLayout 团队菜单', () => {
   it('团队名称为空时不能提交', async () => {
     const user = userEvent.setup();
 
-    render(
-      <MemoryRouter initialEntries={['/']}>
-        <Routes>
-          <Route path="/" element={<MainLayout />}>
-            <Route index element={<div />} />
-          </Route>
-        </Routes>
-      </MemoryRouter>,
-    );
+    renderMainLayout();
 
     await user.click(screen.getByLabelText('user'));
     await user.click(await screen.findByText('新建团队'));
@@ -231,15 +460,7 @@ describe('MainLayout 团队菜单', () => {
     mockCreateTeam.mockResolvedValue({ id: 'team-3', name: '新团队' });
     const user = userEvent.setup();
 
-    render(
-      <MemoryRouter initialEntries={['/']}>
-        <Routes>
-          <Route path="/" element={<MainLayout />}>
-            <Route index element={<div />} />
-          </Route>
-        </Routes>
-      </MemoryRouter>,
-    );
+    renderMainLayout();
 
     await user.click(screen.getByLabelText('user'));
     await user.click(await screen.findByText('新建团队'));
@@ -253,7 +474,8 @@ describe('MainLayout 团队菜单', () => {
       });
     });
 
-    expect(mockTeamState.setTeams).toHaveBeenCalledWith([{ id: 'team-3', name: '新团队' }]);
+    expect(mockAddTeam).toHaveBeenCalledWith({ id: 'team-3', name: '新团队' });
+    expect(mockTeamState.setTeams).not.toHaveBeenCalledWith([{ id: 'team-3', name: '新团队' }]);
     expect(mockTeamState.setCurrentTeamId).toHaveBeenCalledWith('team-3');
     await waitFor(() => {
       expect(screen.queryByRole('dialog', { name: '新建团队' })).toBeNull();

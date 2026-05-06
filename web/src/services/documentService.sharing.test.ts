@@ -1,5 +1,5 @@
 import { describe, expect, it, vi, beforeEach } from 'vitest';
-import { shareDocument, unshareDocument } from './documentService';
+import { shareDocument, unshareDocument, isDocumentSharedInTeam } from './documentService';
 import { supabase } from '../lib/supabase';
 import * as cryptoKeyService from './cryptoKeyService';
 
@@ -37,12 +37,15 @@ vi.mock('../lib/supabase', () => ({
     storage: { from: vi.fn() },
     from: vi.fn(),
     functions: { invoke: vi.fn() },
+    auth: { getSession: vi.fn(async () => ({ data: { session: { user: { id: 'owner-id' }, expires_at: 9999999999 } } })) },
   },
 }));
 
 const resetMocks = () => {
   (supabase.from as unknown as MockFn).mockReset();
   (supabase.functions.invoke as unknown as MockFn).mockReset();
+  (supabase.auth.getSession as unknown as MockFn).mockReset();
+  (supabase.auth.getSession as unknown as MockFn).mockResolvedValue({ data: { session: { user: { id: 'owner-id' }, expires_at: 9999999999 } } });
   vi.mocked(cryptoKeyService.isWebCryptoAvailable).mockImplementation(() => true);
   vi.mocked(cryptoKeyService.getUserKeyPair).mockImplementation(async () => ({
     publicKey: { type: 'public' } as unknown as CryptoKey,
@@ -185,6 +188,83 @@ describe('shareDocument', () => {
     await expect(
       shareDocument({ documentId: 'doc-1', ownerUserId: 'owner-uid', targetUserIds: ['user-a'] }),
     ).rejects.toThrow('Web Crypto API');
+  });
+});
+
+
+
+describe('isDocumentSharedInTeam', () => {
+  beforeEach(resetMocks);
+
+  it('查询当前团队共享状态：存在记录时返回 true', async () => {
+    const fromMock = supabase.from as unknown as MockFn;
+
+    fromMock.mockImplementation((table: string) => {
+      if (table === 'document_shares') {
+        return {
+          select: vi.fn().mockReturnValue({
+            eq: vi.fn().mockReturnValue({
+              eq: vi.fn().mockReturnValue({
+                limit: vi.fn().mockReturnValue({
+                  maybeSingle: vi.fn().mockResolvedValue({ data: { id: 'share-1' }, error: null }),
+                }),
+              }),
+            }),
+          }),
+        };
+      }
+      return {};
+    });
+
+    const result = await isDocumentSharedInTeam('doc-1', 'team-1');
+    expect(result).toBe(true);
+  });
+
+  it('查询当前团队共享状态：无记录时返回 false', async () => {
+    const fromMock = supabase.from as unknown as MockFn;
+
+    fromMock.mockImplementation((table: string) => {
+      if (table === 'document_shares') {
+        return {
+          select: vi.fn().mockReturnValue({
+            eq: vi.fn().mockReturnValue({
+              eq: vi.fn().mockReturnValue({
+                limit: vi.fn().mockReturnValue({
+                  maybeSingle: vi.fn().mockResolvedValue({ data: null, error: null }),
+                }),
+              }),
+            }),
+          }),
+        };
+      }
+      return {};
+    });
+
+    const result = await isDocumentSharedInTeam('doc-1', 'team-1');
+    expect(result).toBe(false);
+  });
+
+  it('查询当前团队共享状态：数据库错误时抛出异常', async () => {
+    const fromMock = supabase.from as unknown as MockFn;
+
+    fromMock.mockImplementation((table: string) => {
+      if (table === 'document_shares') {
+        return {
+          select: vi.fn().mockReturnValue({
+            eq: vi.fn().mockReturnValue({
+              eq: vi.fn().mockReturnValue({
+                limit: vi.fn().mockReturnValue({
+                  maybeSingle: vi.fn().mockResolvedValue({ data: null, error: new Error('db down') }),
+                }),
+              }),
+            }),
+          }),
+        };
+      }
+      return {};
+    });
+
+    await expect(isDocumentSharedInTeam('doc-1', 'team-1')).rejects.toThrow('db down');
   });
 });
 

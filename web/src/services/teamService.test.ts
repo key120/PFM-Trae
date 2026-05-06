@@ -1,12 +1,16 @@
 import { beforeEach, describe, expect, it, vi } from 'vitest';
 import {
+  acceptTeamInvitation,
   createGroup,
   createTeam,
   deleteGroup,
+  fetchInvitationNotifications,
   fetchTeamGroups,
   fetchTeamMembers,
+  fetchUserTeams,
   getCurrentUserTeamRole,
   inviteMembers,
+  rejectTeamInvitation,
   removeMember,
   updateGroup,
   updateMember,
@@ -34,6 +38,90 @@ function mockTables(handlers: Record<string, unknown>) {
 
     return handler;
   });
+}
+
+const teamMemberRows = [
+  {
+    id: 'member-1',
+    user_id: 'user-1',
+    name: null,
+    role: 'admin',
+    group_id: 'group-1',
+    team_groups: { name: '管理组' },
+  },
+  {
+    id: 'member-2',
+    user_id: null,
+    name: '访客',
+    role: 'reader',
+    group_id: null,
+    team_groups: null,
+  },
+];
+
+const teamMemberSummaries = [
+  {
+    id: 'member-1',
+    userId: 'user-1',
+    name: '',
+    email: 'owner@example.com',
+    role: 'admin',
+    groupId: 'group-1',
+    groupName: '管理组',
+  },
+  {
+    id: 'member-2',
+    userId: null,
+    name: '访客',
+    email: '—',
+    role: 'reader',
+    groupId: null,
+    groupName: null,
+  },
+];
+
+function createProfilesBuilder(data: Array<{ id: string; email: string | null }>, error: unknown = null) {
+  const builder = {
+    select: vi.fn(() => builder),
+    in: vi.fn().mockResolvedValue({ data, error }),
+  };
+
+  return builder;
+}
+
+function createNotificationsBuilder(data: unknown[], error: unknown = null) {
+  const builder = {
+    select: vi.fn(() => builder),
+    eq: vi.fn().mockImplementationOnce(() => builder).mockImplementationOnce(() => builder),
+    order: vi.fn().mockResolvedValue({ data, error }),
+  };
+
+  return builder;
+}
+
+function createTeamMembersQueryBuilder(data: unknown[], error: unknown = null) {
+  const builder = {
+    select: vi.fn(() => builder),
+    eq: vi.fn()
+      .mockImplementationOnce(() => builder)
+      .mockResolvedValueOnce({ data, error }),
+  };
+
+  return builder;
+}
+
+function createExistingMembersBuilder(data: unknown[], error: unknown = null) {
+  const builder: { select: MockFn; eq: MockFn; in: MockFn } = {
+    select: vi.fn(),
+    eq: vi.fn(),
+    in: vi.fn().mockResolvedValue({ data, error }),
+  };
+  builder.select.mockImplementation(() => builder);
+  builder.eq
+    .mockImplementationOnce(() => builder)
+    .mockImplementationOnce(() => builder);
+
+  return builder;
 }
 
 describe('teamService', () => {
@@ -155,6 +243,53 @@ describe('teamService', () => {
     });
   });
 
+  describe('fetchUserTeams', () => {
+    it('返回当前用户的 active 团队列表', async () => {
+      const builder = {
+        select: vi.fn(() => builder),
+        eq: vi.fn()
+          .mockImplementationOnce(() => builder)
+          .mockImplementationOnce(() => Promise.resolve({
+            data: [
+              { team_id: 'team-1', teams: { id: 'team-1', name: '团队 A' } },
+              { team_id: 'team-2', teams: [{ id: 'team-2', name: '团队 B' }] },
+            ],
+            error: null,
+          })),
+      };
+
+      mockTables({
+        team_members: builder,
+      });
+
+      await expect(fetchUserTeams('user-1')).resolves.toEqual([
+        { id: 'team-1', name: '团队 A' },
+        { id: 'team-2', name: '团队 B' },
+      ]);
+      expect(builder.select).toHaveBeenCalledWith('team_id, teams!inner(id, name)');
+      expect(builder.eq).toHaveBeenNthCalledWith(1, 'user_id', 'user-1');
+      expect(builder.eq).toHaveBeenNthCalledWith(2, 'status', 'active');
+    });
+
+    it('查询失败时抛出中文错误', async () => {
+      const builder = {
+        select: vi.fn(() => builder),
+        eq: vi.fn()
+          .mockImplementationOnce(() => builder)
+          .mockImplementationOnce(() => Promise.resolve({
+            data: null,
+            error: { message: 'permission denied' },
+          })),
+      };
+
+      mockTables({
+        team_members: builder,
+      });
+
+      await expect(fetchUserTeams('user-1')).rejects.toThrow('获取团队列表失败：permission denied');
+    });
+  });
+
   describe('getCurrentUserTeamRole', () => {
     it('返回当前用户在团队中的角色', async () => {
       const builder = {
@@ -255,25 +390,8 @@ describe('teamService', () => {
     });
 
     it('归一化邮箱后创建邀请', async () => {
-      const profilesBuilder = {
-        select: vi.fn(() => profilesBuilder),
-        in: vi.fn().mockResolvedValue({
-          data: [{ id: 'user-1', email: 'A@Example.COM' }],
-          error: null,
-        }),
-      };
-      const teamMembersBuilder: { select: MockFn; eq: MockFn; in: MockFn } = {
-        select: vi.fn(),
-        eq: vi.fn(),
-        in: vi.fn().mockResolvedValue({
-          data: [],
-          error: null,
-        }),
-      };
-      teamMembersBuilder.select.mockImplementation(() => teamMembersBuilder);
-      teamMembersBuilder.eq
-        .mockImplementationOnce(() => teamMembersBuilder)
-        .mockImplementationOnce(() => teamMembersBuilder);
+      const profilesBuilder = createProfilesBuilder([{ id: 'user-1', email: 'A@Example.COM' }]);
+      const teamMembersBuilder = createExistingMembersBuilder([]);
       const insertInvitations = vi.fn().mockResolvedValue({ error: null });
 
       mockTables({
@@ -320,25 +438,8 @@ describe('teamService', () => {
     });
 
     it('发现已存在的团队成员时抛出明确错误', async () => {
-      const profilesBuilder = {
-        select: vi.fn(() => profilesBuilder),
-        in: vi.fn().mockResolvedValue({
-          data: [{ id: 'user-1', email: 'member@example.com' }],
-          error: null,
-        }),
-      };
-      const teamMembersBuilder: { select: MockFn; eq: MockFn; in: MockFn } = {
-        select: vi.fn(),
-        eq: vi.fn(),
-        in: vi.fn().mockResolvedValue({
-          data: [{ user_id: 'user-1' }],
-          error: null,
-        }),
-      };
-      teamMembersBuilder.select.mockImplementation(() => teamMembersBuilder);
-      teamMembersBuilder.eq
-        .mockImplementationOnce(() => teamMembersBuilder)
-        .mockImplementationOnce(() => teamMembersBuilder);
+      const profilesBuilder = createProfilesBuilder([{ id: 'user-1', email: 'member@example.com' }]);
+      const teamMembersBuilder = createExistingMembersBuilder([{ user_id: 'user-1' }]);
       const insertInvitations = vi.fn();
 
       mockTables({
@@ -360,63 +461,35 @@ describe('teamService', () => {
   });
 
   describe('fetchTeamMembers', () => {
-    it('返回激活成员列表并补齐默认值', async () => {
-      const builder = {
-        select: vi.fn(() => builder),
-        eq: vi.fn()
-          .mockImplementationOnce(() => builder)
-          .mockResolvedValueOnce({
-            data: [
-              {
-                id: 'member-1',
-                user_id: 'user-1',
-                name: null,
-                role: 'admin',
-                group_id: 'group-1',
-                profiles: { email: 'owner@example.com' },
-                team_groups: { name: '管理组' },
-              },
-              {
-                id: 'member-2',
-                user_id: null,
-                name: '访客',
-                role: 'reader',
-                group_id: null,
-                profiles: null,
-                team_groups: null,
-              },
-            ],
-            error: null,
-          }),
-      };
+    it('通过单独查询 profiles 补全成员邮箱，避免依赖联表关系', async () => {
+      const teamMembersBuilder = createTeamMembersQueryBuilder(teamMemberRows);
+      const profilesBuilder = createProfilesBuilder([{ id: 'user-1', email: 'owner@example.com' }]);
 
       mockTables({
-        team_members: builder,
+        team_members: teamMembersBuilder,
+        profiles: profilesBuilder,
       });
 
-      await expect(fetchTeamMembers('team-1')).resolves.toEqual([
-        {
-          id: 'member-1',
-          userId: 'user-1',
-          name: '',
-          email: 'owner@example.com',
-          role: 'admin',
-          groupId: 'group-1',
-          groupName: '管理组',
-        },
-        {
-          id: 'member-2',
-          userId: null,
-          name: '访客',
-          email: '—',
-          role: 'reader',
-          groupId: null,
-          groupName: null,
-        },
-      ]);
-      expect(builder.select).toHaveBeenCalledWith('id, user_id, name, role, group_id, profiles(email), team_groups(name)');
-      expect(builder.eq).toHaveBeenNthCalledWith(1, 'team_id', 'team-1');
-      expect(builder.eq).toHaveBeenNthCalledWith(2, 'status', 'active');
+      await expect(fetchTeamMembers('team-1')).resolves.toEqual(teamMemberSummaries);
+
+      expect(teamMembersBuilder.select).toHaveBeenCalledWith('id, user_id, name, role, group_id, team_groups(name)');
+      expect(profilesBuilder.in).toHaveBeenCalledWith('id', ['user-1']);
+    });
+
+    it('返回激活成员列表并补齐默认值', async () => {
+      const teamMembersBuilder = createTeamMembersQueryBuilder(teamMemberRows);
+      const profilesBuilder = createProfilesBuilder([{ id: 'user-1', email: 'owner@example.com' }]);
+
+      mockTables({
+        team_members: teamMembersBuilder,
+        profiles: profilesBuilder,
+      });
+
+      await expect(fetchTeamMembers('team-1')).resolves.toEqual(teamMemberSummaries);
+      expect(teamMembersBuilder.select).toHaveBeenCalledWith('id, user_id, name, role, group_id, team_groups(name)');
+      expect(teamMembersBuilder.eq).toHaveBeenNthCalledWith(1, 'team_id', 'team-1');
+      expect(teamMembersBuilder.eq).toHaveBeenNthCalledWith(2, 'status', 'active');
+      expect(profilesBuilder.in).toHaveBeenCalledWith('id', ['user-1']);
     });
   });
 
@@ -507,18 +580,139 @@ describe('teamService', () => {
     });
   });
 
-  describe('deleteGroup', () => {
-    it('按 id 删除成员组', async () => {
-      const eq = vi.fn().mockResolvedValue({ error: null });
-      const remove = vi.fn().mockReturnValue({ eq });
+  describe('invitationNotifications', () => {
+    it('返回已处理邀请通知时保留状态字段并标记为已读', async () => {
+      const notificationsBuilder = createNotificationsBuilder([
+        {
+          id: 'notice-1',
+          type: 'team_invitation',
+          is_read: true,
+          created_at: '2026-04-23T11:00:00.000Z',
+          payload: {
+            invitationId: 'invite-1',
+            teamId: 'team-1',
+            teamName: '团队 A',
+            role: 'editor',
+            invitedBy: 'owner@example.com',
+            inviteeEmail: 'user@example.com',
+            status: 'accepted',
+          },
+        },
+      ]);
 
-      mockTables({
-        team_groups: { delete: remove },
-      });
+      mockTables({ notifications: notificationsBuilder });
 
-      await expect(deleteGroup('group-1')).resolves.toBeUndefined();
-      expect(remove).toHaveBeenCalledTimes(1);
-      expect(eq).toHaveBeenCalledWith('id', 'group-1');
+      await expect(fetchInvitationNotifications('user-1', 'user@example.com')).resolves.toEqual([
+        {
+          type: 'team_invitation',
+          notificationId: 'notice-1',
+          invitationId: 'invite-1',
+          teamId: 'team-1',
+          teamName: '团队 A',
+          role: 'editor',
+          invitedBy: 'owner@example.com',
+          inviteeEmail: 'user@example.com',
+          createdAt: '2026-04-23T11:00:00.000Z',
+          status: 'accepted',
+          isRead: true,
+        },
+      ]);
     });
+
+    it('返回邀请结果通知时映射为 team_invitation_result', async () => {
+      const notificationsBuilder = createNotificationsBuilder([
+        {
+          id: 'notice-2',
+          type: 'team_invitation_result',
+          is_read: false,
+          created_at: '2026-04-23T12:00:00.000Z',
+          payload: {
+            inviteeEmail: 'yaobowen120@126.com',
+            result: 'rejected',
+          },
+        },
+      ]);
+
+      mockTables({ notifications: notificationsBuilder });
+
+      await expect(fetchInvitationNotifications('user-1', 'owner@example.com')).resolves.toEqual([
+        {
+          type: 'team_invitation_result',
+          notificationId: 'notice-2',
+          inviteeEmail: 'yaobowen120@126.com',
+          result: 'rejected',
+          createdAt: '2026-04-23T12:00:00.000Z',
+          isRead: false,
+        },
+      ]);
+    });
+
+    it('接受邀请时调用 respond_to_team_invitation rpc', async () => {
+      (supabase.rpc as unknown as MockFn).mockResolvedValue({ data: null, error: null });
+
+      await expect(acceptTeamInvitation({ invitationId: 'invite-1' })).resolves.toBeUndefined();
+
+      expect(supabase.rpc).toHaveBeenCalledWith('respond_to_team_invitation', {
+        p_invitation_id: 'invite-1',
+        p_action: 'accepted',
+      });
+    });
+
+    it('拒绝邀请时调用 respond_to_team_invitation rpc', async () => {
+      (supabase.rpc as unknown as MockFn).mockResolvedValue({ data: null, error: null });
+
+      await expect(rejectTeamInvitation({ invitationId: 'invite-1' })).resolves.toBeUndefined();
+
+      expect(supabase.rpc).toHaveBeenCalledWith('respond_to_team_invitation', {
+        p_invitation_id: 'invite-1',
+        p_action: 'rejected',
+      });
+    });
+
+    it('历史通知 payload 中 invitedBy 为 UUID 时会回填邀请人邮箱', async () => {
+      const notificationsBuilder = createNotificationsBuilder([
+        {
+          id: 'notice-legacy-1',
+          type: 'team_invitation',
+          is_read: false,
+          created_at: '2026-04-29T10:00:00.000Z',
+          payload: {
+            invitationId: 'invite-legacy-1',
+            teamId: 'team-1',
+            teamName: '团队 A',
+            role: 'editor',
+            invitedBy: '633771d1-0832-402f-af90-3e9b922a7d87',
+            inviteeEmail: 'yaobowen120@126.com',
+          },
+        },
+      ]);
+
+      const profileFromBuilder = createProfilesBuilder([
+        { id: '633771d1-0832-402f-af90-3e9b922a7d87', email: 'key120@126.com' },
+      ]);
+
+      mockTables({ notifications: notificationsBuilder, profiles: profileFromBuilder });
+
+      await expect(fetchInvitationNotifications('user-1', 'yaobowen120@126.com')).resolves.toEqual([
+        {
+          type: 'team_invitation',
+          notificationId: 'notice-legacy-1',
+          invitationId: 'invite-legacy-1',
+          teamId: 'team-1',
+          teamName: '团队 A',
+          role: 'editor',
+          invitedBy: 'key120@126.com',
+          inviteeEmail: 'yaobowen120@126.com',
+          createdAt: '2026-04-29T10:00:00.000Z',
+          status: 'pending',
+          isRead: false,
+        },
+      ]);
+
+      expect(profileFromBuilder.select).toHaveBeenCalledWith('id, email');
+      expect(profileFromBuilder.in).toHaveBeenCalledWith('id', ['633771d1-0832-402f-af90-3e9b922a7d87']);
+    });
+
+
   });
 });

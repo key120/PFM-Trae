@@ -20,7 +20,6 @@ export interface InviteMembersInput {
   invitedBy: string;
   rows: InviteMemberRowInput[];
 }
-
 export interface TeamMemberSummary {
   id: string;
   userId: string | null;
@@ -30,6 +29,32 @@ export interface TeamMemberSummary {
   groupId: string | null;
   groupName: string | null;
 }
+
+export type TeamInvitationStatus = 'pending' | 'accepted' | 'rejected';
+export type TeamInvitationResult = 'accepted' | 'rejected';
+
+export type TeamInvitationNotification =
+  | {
+      type: 'team_invitation';
+      notificationId: string;
+      invitationId: string;
+      teamId: string;
+      teamName: string;
+      role: TeamRole;
+      invitedBy: string;
+      inviteeEmail: string;
+      createdAt: string;
+      status: TeamInvitationStatus;
+      isRead: boolean;
+    }
+  | {
+      type: 'team_invitation_result';
+      notificationId: string;
+      inviteeEmail: string;
+      result: TeamInvitationResult;
+      createdAt: string;
+      isRead: boolean;
+    };
 
 interface CreateTeamInput {
   userId: string;
@@ -47,12 +72,60 @@ interface TeamMemberRow {
   name: string | null;
   role: TeamRole;
   group_id: string | null;
-  profiles?: {
-    email?: string | null;
-  } | null;
   team_groups?: {
     name?: string | null;
   } | null;
+}
+
+interface ProfileEmailRow {
+  id: string;
+  email: string | null;
+}
+
+interface NotificationRow {
+  id: string;
+  type: 'team_invitation' | 'team_invitation_result';
+  is_read: boolean;
+  created_at: string;
+  payload: {
+    invitationId?: string;
+    teamId?: string;
+    teamName?: string;
+    role?: TeamRole;
+    invitedBy?: string;
+    inviteeEmail?: string;
+    status?: TeamInvitationStatus;
+    result?: TeamInvitationResult;
+  } | null;
+}
+
+interface InvitationFallbackRow {
+  id: string;
+  team_id: string;
+  role: TeamRole;
+  invitee_email: string;
+  invited_by: string;
+  created_at: string;
+  teams?: {
+    name?: string | null;
+  } | null;
+}
+
+function looksLikeUuid(value: string) {
+  return /^[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i.test(value);
+}
+
+interface AcceptTeamInvitationInput {
+  invitationId: string;
+}
+
+interface RejectTeamInvitationInput {
+  invitationId: string;
+}
+
+interface TeamRow {
+  id: string;
+  name: string;
 }
 
 function getErrorMessage(error: { message?: string } | null | undefined, fallback: string) {
@@ -118,6 +191,45 @@ async function createTeamFallback(name: string): Promise<TeamSummary> {
   };
 }
 
+function createEmailMapFromProfiles(profiles: ProfileEmailRow[] | null) {
+  return new Map(
+    (profiles ?? [])
+      .filter((profile) => profile.email)
+      .map((profile) => [profile.id, profile.email as string]),
+  );
+}
+
+async function fetchProfileEmailMapByUserIds(userIds: string[]) {
+  if (userIds.length === 0) {
+    return new Map<string, string>();
+  }
+
+  const { data: rawProfiles, error: profilesError } = await supabase
+    .from('profiles')
+    .select('id, email')
+    .in('id', userIds);
+
+  if (profilesError) {
+    throw profilesError;
+  }
+
+  const profiles = (rawProfiles ?? null) as unknown as ProfileEmailRow[] | null;
+  return createEmailMapFromProfiles(profiles);
+}
+
+async function respondToTeamInvitation(input: {
+  invitationId: string;
+  action: TeamInvitationResult;
+}) {
+  const { error } = await supabase.rpc('respond_to_team_invitation', {
+    p_invitation_id: input.invitationId,
+    p_action: input.action,
+  });
+
+  if (error) {
+    throw error;
+  }
+}
 function validateGroupName(name: string) {
   const trimmedName = name.trim();
   if (!trimmedName) {
@@ -154,6 +266,36 @@ export async function createTeam(input: CreateTeamInput): Promise<TeamSummary> {
     id: team.id,
     name: team.name,
   };
+}
+
+export async function fetchUserTeams(userId: string): Promise<TeamSummary[]> {
+  const { data, error } = await supabase
+    .from('team_members')
+    .select('team_id, teams!inner(id, name)')
+    .eq('user_id', userId)
+    .eq('status', 'active');
+
+  if (error) {
+    throw new Error(`获取团队列表失败：${getErrorMessage(error, '未知错误')}`);
+  }
+
+  const rows = (data ?? []) as Array<{
+    team_id: string;
+    teams?: TeamRow | TeamRow[] | null;
+  }>;
+
+  return rows
+    .map((row) => {
+      const team = Array.isArray(row.teams) ? row.teams[0] : row.teams;
+      if (!team || typeof team.id !== 'string' || typeof team.name !== 'string') {
+        return null;
+      }
+      return {
+        id: team.id,
+        name: team.name,
+      } satisfies TeamSummary;
+    })
+    .filter((team): team is TeamSummary => team !== null);
 }
 
 export async function getCurrentUserTeamRole(teamId: string, userId: string): Promise<TeamRole | null> {
@@ -268,7 +410,7 @@ export async function inviteMembers(input: InviteMembersInput): Promise<{ insert
 export async function fetchTeamMembers(teamId: string): Promise<TeamMemberSummary[]> {
   const { data: rawData, error } = await supabase
     .from('team_members')
-    .select('id, user_id, name, role, group_id, profiles(email), team_groups(name)')
+    .select('id, user_id, name, role, group_id, team_groups(name)')
     .eq('team_id', teamId)
     .eq('status', 'active');
   const data = (rawData ?? null) as unknown as TeamMemberRow[] | null;
@@ -277,11 +419,19 @@ export async function fetchTeamMembers(teamId: string): Promise<TeamMemberSummar
     throw error;
   }
 
+  const userIds = Array.from(
+    new Set((data ?? [])
+      .map((member) => member.user_id)
+      .filter((userId): userId is string => Boolean(userId))),
+  );
+
+  const emailByUserId = await fetchProfileEmailMapByUserIds(userIds);
+
   return (data ?? []).map((member) => ({
     id: member.id,
     userId: member.user_id,
     name: member.name ?? '',
-    email: member.profiles?.email ?? '—',
+    email: (member.user_id && emailByUserId.get(member.user_id)) ?? '—',
     role: member.role,
     groupId: member.group_id,
     groupName: member.team_groups?.name ?? null,
@@ -350,6 +500,142 @@ export async function updateGroup(groupId: string, name: string): Promise<void> 
   if (error) {
     throw error;
   }
+}
+
+export async function fetchInvitationNotifications(userId: string, userEmail?: string | null): Promise<TeamInvitationNotification[]> {
+  const { data: rawData, error } = await supabase
+    .from('notifications')
+    .select('id, type, is_read, created_at, payload')
+    .eq('user_id', userId)
+    .order('created_at', { ascending: false });
+
+  if (error) {
+    throw error;
+  }
+
+  const rows = (rawData ?? null) as unknown as NotificationRow[] | null;
+  const notifications = (rows ?? [])
+    .map((row) => {
+      const payload = row.payload;
+      if (!payload) {
+        return null;
+      }
+
+      if (row.type === 'team_invitation_result') {
+        if (!payload.inviteeEmail || !payload.result) {
+          return null;
+        }
+
+        return {
+          type: 'team_invitation_result',
+          notificationId: row.id,
+          inviteeEmail: payload.inviteeEmail,
+          result: payload.result,
+          createdAt: row.created_at,
+          isRead: row.is_read,
+        } satisfies TeamInvitationNotification;
+      }
+
+      const invitationId = payload.invitationId ?? row.id;
+      const teamId = payload.teamId;
+      const teamName = payload.teamName ?? '未知团队';
+      const role = payload.role;
+      const invitedBy = payload.invitedBy;
+      const inviteeEmail = payload.inviteeEmail;
+
+      if (!teamId || !role || !invitedBy || !inviteeEmail) {
+        return null;
+      }
+
+      return {
+        type: 'team_invitation',
+        notificationId: row.id,
+        invitationId,
+        teamId,
+        teamName,
+        role,
+        invitedBy,
+        inviteeEmail,
+        createdAt: row.created_at,
+        status: payload.status ?? 'pending',
+        isRead: row.is_read,
+      } satisfies TeamInvitationNotification;
+    })
+    .filter((item): item is TeamInvitationNotification => item !== null);
+
+  const inviterIds = Array.from(new Set(notifications
+    .filter((item): item is Extract<TeamInvitationNotification, { type: 'team_invitation' }> => item.type === 'team_invitation')
+    .map((item) => item.invitedBy)
+    .filter((invitedBy) => looksLikeUuid(invitedBy))));
+
+  const inviterEmailById = await fetchProfileEmailMapByUserIds(inviterIds);
+
+  const resolvedNotifications = notifications.map((item) => {
+    if (item.type !== 'team_invitation') {
+      return item;
+    }
+
+    const inviterEmail = inviterEmailById.get(item.invitedBy);
+    if (!inviterEmail) {
+      return item;
+    }
+
+    return {
+      ...item,
+      invitedBy: inviterEmail,
+    } satisfies TeamInvitationNotification;
+  });
+
+  if (resolvedNotifications.length > 0 || !userEmail) {
+    return resolvedNotifications;
+  }
+
+  const normalizedEmail = normalizeEmail(userEmail);
+  const { data: rawInvitations, error: invitationsError } = await supabase
+    .from('team_invitations')
+    .select('id, team_id, role, invitee_email, invited_by, created_at, teams(name)')
+    .eq('invitee_email', normalizedEmail)
+    .eq('status', 'pending');
+
+  if (invitationsError) {
+    throw invitationsError;
+  }
+
+  const invitations = (rawInvitations ?? null) as unknown as InvitationFallbackRow[] | null;
+  const fallbackInvitations = invitations ?? [];
+  const fallbackInviterIds = Array.from(new Set(fallbackInvitations
+    .map((invitation) => invitation.invited_by)
+    .filter((invitedBy) => looksLikeUuid(invitedBy))));
+
+  const fallbackInviterEmailById = await fetchProfileEmailMapByUserIds(fallbackInviterIds);
+
+  return fallbackInvitations.map((invitation) => ({
+    type: 'team_invitation',
+    notificationId: invitation.id,
+    invitationId: invitation.id,
+    teamId: invitation.team_id,
+    teamName: invitation.teams?.name ?? '未知团队',
+    role: invitation.role,
+    invitedBy: fallbackInviterEmailById.get(invitation.invited_by) ?? invitation.invited_by,
+    inviteeEmail: invitation.invitee_email,
+    createdAt: invitation.created_at,
+    status: 'pending',
+    isRead: false,
+  }));
+}
+
+export async function acceptTeamInvitation(input: AcceptTeamInvitationInput): Promise<void> {
+  await respondToTeamInvitation({
+    invitationId: input.invitationId,
+    action: 'accepted',
+  });
+}
+
+export async function rejectTeamInvitation(input: RejectTeamInvitationInput): Promise<void> {
+  await respondToTeamInvitation({
+    invitationId: input.invitationId,
+    action: 'rejected',
+  });
 }
 
 export async function deleteGroup(groupId: string): Promise<void> {

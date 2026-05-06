@@ -86,7 +86,11 @@ const saveKeyPair = async (userId: string, keyPair: CryptoKeyPair): Promise<void
 
 const upsertUserPublicKey = async (user: User, publicJwk: JsonWebKey): Promise<void> => {
   const { error } = await supabase.from('profiles').upsert(
-    { id: user.id, public_key: publicJwk },
+    {
+      id: user.id,
+      email: user.email ?? null,
+      public_key: publicJwk,
+    },
     { onConflict: 'id' },
   );
   if (error) {
@@ -161,20 +165,25 @@ export const restoreUserPrivateKey = async (keyVersion?: number): Promise<Crypto
 
 export const ensureUserKeyPair = async (user: User): Promise<void> => {
   if (!isWebCryptoAvailable()) {
+    console.warn('[ensureUserKeyPair] Web Crypto API 不可用');
     return;
   }
 
   try {
     let stored = await getStoredKeyPair(user.id);
+    console.log('[ensureUserKeyPair] IndexedDB 中的密钥对:', stored ? '已存在' : '不存在');
 
     if (!stored) {
       // 优先从备份恢复
+      console.log('[ensureUserKeyPair] 尝试从服务器备份恢复...');
       await restoreUserPrivateKey();
       stored = await getStoredKeyPair(user.id);
+      console.log('[ensureUserKeyPair] 恢复后密钥对:', stored ? '成功' : '仍不存在');
     }
 
     if (!stored) {
       // 恢复失败，生成新密钥对
+      console.log('[ensureUserKeyPair] 生成新密钥对...');
       const keyPair = (await crypto.subtle.generateKey(
         {
           name: 'RSA-OAEP',
@@ -193,12 +202,15 @@ export const ensureUserKeyPair = async (user: User): Promise<void> => {
       };
 
       // 自动备份新生成的私钥
+      console.log('[ensureUserKeyPair] 备份新私钥...');
       await backupUserPrivateKey(keyPair.privateKey);
     }
 
     const publicJwk = await crypto.subtle.exportKey('jwk', stored.publicKey);
     await upsertUserPublicKey(user, publicJwk);
-  } catch {
+    console.log('[ensureUserKeyPair] 完成，公钥已同步到 profiles');
+  } catch (err) {
+    console.error('[ensureUserKeyPair] 失败:', err);
   }
 };
 
@@ -425,7 +437,7 @@ export const distributeDocumentKey = async (
       wrapped_document_key: wrappedDocumentKey,
       key_version: keyVersion,
     },
-    { onConflict: 'document_id,user_id,key_version' },
+    { onConflict: 'document_id,user_id,key_version', ignoreDuplicates: true },
   );
 
   if (error) {

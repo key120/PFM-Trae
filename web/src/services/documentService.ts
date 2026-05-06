@@ -8,6 +8,7 @@ import {
   wrapDocumentKey,
   unwrapDocumentKey,
   getUserKeyPair,
+  ensureUserKeyPair,
   isWebCryptoAvailable,
   distributeDocumentKey,
   revokeDocumentKeyAccess,
@@ -645,6 +646,10 @@ export async function shareDocument(input: ShareDocumentInput): Promise<ShareDoc
     throw new Error('当前浏览器不支持 Web Crypto API，无法共享文档');
   }
 
+  // 诊断：检查当前 auth session 状态
+  const { data: { session: currentSession } } = await supabase.auth.getSession();
+  console.log('[shareDocument] auth uid:', currentSession?.user?.id, 'input ownerUserId:', input.ownerUserId, 'token expires:', currentSession?.expires_at);
+
   // Step 1：获取最新版本的 key_version，找到 owner 的 wrapped_document_key
   const { data: keyData, error: keyError } = await supabase
     .from('document_keys')
@@ -655,12 +660,26 @@ export async function shareDocument(input: ShareDocumentInput): Promise<ShareDoc
     .limit(1)
     .single();
 
-  if (keyError || !keyData) {
+  if (keyError) {
+    console.error('[shareDocument] 查询 document_keys 失败:', keyError);
+    throw new Error(`无法获取文档密钥: ${keyError.message}`);
+  }
+  if (!keyData) {
+    console.error('[shareDocument] 未找到 document_keys 记录, documentId:', input.documentId, 'ownerUserId:', input.ownerUserId);
     throw new Error('无法获取文档密钥，请确认您是文档所有者');
   }
 
   // Step 2：owner 解封自己的 DocumentKey
-  const ownerKeyPair = await getUserKeyPair(input.ownerUserId);
+  let ownerKeyPair = await getUserKeyPair(input.ownerUserId);
+  if (!ownerKeyPair) {
+    // 密钥对可能未初始化（登录时 ensureUserKeyPair 异步失败），尝试重新初始化
+    console.warn('[shareDocument] 密钥对不存在，尝试重新初始化...');
+    const { data: { user: currentUser } } = await supabase.auth.getUser();
+    if (currentUser) {
+      await ensureUserKeyPair(currentUser);
+      ownerKeyPair = await getUserKeyPair(input.ownerUserId);
+    }
+  }
   if (!ownerKeyPair) {
     throw new Error('未找到用户密钥，请重新登录后重试');
   }
@@ -707,6 +726,26 @@ export async function shareDocument(input: ShareDocumentInput): Promise<ShareDoc
  * 1. 撤销目标用户的 document_keys 记录（无法再解密）
  * 2. 若 teamId 传入，同时删除 document_shares 记录
  */
+
+export async function isDocumentSharedInTeam(
+  documentId: string,
+  teamId: string,
+): Promise<boolean> {
+  const { data, error } = await supabase
+    .from('document_shares')
+    .select('id')
+    .eq('document_id', documentId)
+    .eq('team_id', teamId)
+    .limit(1)
+    .maybeSingle();
+
+  if (error) {
+    throw error;
+  }
+
+  return Boolean(data?.id);
+}
+
 export async function unshareDocument(
   documentId: string,
   targetUserIds: string[],
@@ -725,5 +764,227 @@ export async function unshareDocument(
       .eq('document_id', documentId)
       .eq('team_id', teamId);
   }
+}
+
+// ─── 共享文档列表（被共享方视角） ─────────────────────────────────────────────────
+
+export interface SharedDocument {
+  id: string;
+  name: string;
+  size: number | null;
+  sharedAt: string;
+  sharedBy: string | null;
+  version?: string | null;
+}
+
+export async function fetchSharedDocuments(
+  userId: string,
+  teamId: string,
+): Promise<SharedDocument[]> {
+  const { data: shares, error: sharesError } = await supabase
+    .from('document_shares')
+    .select('document_id, shared_by, created_at')
+    .eq('team_id', teamId);
+
+  if (sharesError) {
+    throw sharesError;
+  }
+
+  if (!shares || shares.length === 0) {
+    return [];
+  }
+
+  const { data: keys, error: keysError } = await supabase
+    .from('document_keys')
+    .select('document_id')
+    .eq('user_id', userId);
+
+  if (keysError) {
+    throw keysError;
+  }
+
+  const accessibleDocIds = new Set((keys ?? []).map((k) => k.document_id as string));
+
+  // 排除自己共享给他人的文档（"共享文档"页签只显示别人共享给自己的）
+  const relevantShares = shares.filter(
+    (s) => s.shared_by !== userId && accessibleDocIds.has(s.document_id as string),
+  );
+
+  if (relevantShares.length === 0) {
+    return [];
+  }
+
+  const docIds = relevantShares.map((s) => s.document_id as string);
+  const { data: docs, error: docsError } = await supabase
+    .from('documents')
+    .select('id, encrypted_title, size, metadata')
+    .in('id', docIds);
+
+  if (docsError) {
+    throw docsError;
+  }
+
+  const shareByDocId = new Map(
+    relevantShares.map((s) => [s.document_id as string, s]),
+  );
+
+  const ownerIds = Array.from(new Set(
+    relevantShares
+      .map((s) => s.shared_by as string)
+      .filter(Boolean),
+  ));
+
+  let ownerEmailMap = new Map<string, string>();
+  if (ownerIds.length > 0) {
+    const { data: profiles } = await supabase
+      .from('profiles')
+      .select('id, email')
+      .in('id', ownerIds);
+    if (profiles) {
+      ownerEmailMap = new Map(profiles.map((p) => [p.id as string, p.email as string]));
+    }
+  }
+
+  return (docs ?? []).map((doc) => {
+    const share = shareByDocId.get(doc.id as string);
+    const meta = (doc.metadata as DocumentMetadata | null) ?? null;
+    const sharedById = share?.shared_by as string | null;
+    return {
+      id: doc.id as string,
+      name: (doc.encrypted_title as string) || '未命名文档',
+      size: typeof doc.size === 'number' ? doc.size : null,
+      sharedAt: (share?.created_at as string) || '',
+      sharedBy: sharedById ? (ownerEmailMap.get(sharedById) || sharedById) : null,
+      version: meta?.latestVersion ?? null,
+    };
+  });
+}
+
+export async function loadSharedDocument(
+  userId: string,
+  documentId: string,
+): Promise<LoadedPersonalDocument> {
+  const { data, error } = await supabase
+    .from('documents')
+    .select('path, metadata')
+    .eq('id', documentId)
+    .single();
+
+  if (error || !data) {
+    throw error || new Error('无法加载共享文档信息');
+  }
+
+  const metadata = (data.metadata as DocumentMetadata | null) ?? null;
+
+  const { data: versionData, error: versionError } = await supabase
+    .from('document_versions')
+    .select('id, r2_key, content_hash, encrypted_meta, version_label, note, key_version')
+    .eq('document_id', documentId)
+    .order('created_at', { ascending: false })
+    .limit(1)
+    .single();
+
+  if (versionError || !versionData) {
+    throw versionError || new Error('无法加载文档版本');
+  }
+
+  const versionKeyVersion =
+    typeof (versionData as { key_version?: unknown }).key_version === 'number'
+      ? ((versionData as { key_version: number }).key_version)
+      : null;
+
+  let keyRows: Array<{ wrapped_document_key: string; key_version: number }> = [];
+
+  if (versionKeyVersion !== null) {
+    const { data: exactKeyData } = await supabase
+      .from('document_keys')
+      .select('wrapped_document_key, key_version')
+      .eq('document_id', documentId)
+      .eq('user_id', userId)
+      .eq('key_version', versionKeyVersion)
+      .limit(1);
+
+    if (exactKeyData && exactKeyData.length > 0) {
+      keyRows = exactKeyData as Array<{ wrapped_document_key: string; key_version: number }>;
+    }
+  }
+
+  if (keyRows.length === 0) {
+    const { data: fallbackKeyRows, error: fallbackKeyError } = await supabase
+      .from('document_keys')
+      .select('wrapped_document_key, key_version')
+      .eq('document_id', documentId)
+      .eq('user_id', userId)
+      .order('key_version', { ascending: false })
+      .limit(5);
+
+    if (fallbackKeyError || !fallbackKeyRows || fallbackKeyRows.length === 0) {
+      throw new Error('无法找到解密密钥，您可能没有该文档的访问权限');
+    }
+
+    keyRows = fallbackKeyRows as Array<{ wrapped_document_key: string; key_version: number }>;
+  }
+
+  let keyPair = await getUserKeyPair(userId);
+  if (!keyPair) {
+    await restoreUserPrivateKey();
+    keyPair = await getUserKeyPair(userId);
+  }
+  if (!keyPair) {
+    throw new Error('未找到用户密钥，请重新登录后重试');
+  }
+
+  let documentKey: CryptoKey | null = null;
+  for (const row of keyRows) {
+    try {
+      documentKey = await unwrapDocumentKey(row.wrapped_document_key, keyPair.privateKey);
+      break;
+    } catch {
+      const restoredLatest = await restoreUserPrivateKey();
+      if (!restoredLatest) continue;
+      keyPair = { ...keyPair, privateKey: restoredLatest };
+      try {
+        documentKey = await unwrapDocumentKey(row.wrapped_document_key, restoredLatest);
+        break;
+      } catch {
+        continue;
+      }
+    }
+  }
+
+  if (!documentKey) {
+    throw new Error('解密密钥不可用，无法解密该共享文档');
+  }
+
+  const encryptedBlob = await downloadFromR2(documentId, versionData.id as string);
+
+  const encMeta = (versionData.encrypted_meta as { title?: string; selectedKeys?: string[] } | null) ?? null;
+  const fileName = encMeta?.title || '未命名文档';
+
+  const { file, meta } = await decryptDocumentChunked(
+    encryptedBlob,
+    documentKey,
+    fileName,
+    'application/vnd.openxmlformats-officedocument.wordprocessingml.document',
+  );
+
+  const selectedKeys =
+    Array.isArray(meta?.selectedKeys)
+      ? (meta.selectedKeys as string[])
+      : Array.isArray(encMeta?.selectedKeys)
+        ? encMeta.selectedKeys
+        : Array.isArray(metadata?.selectedKeys)
+          ? (metadata.selectedKeys as string[])
+          : undefined;
+
+  const version =
+    (versionData.version_label as string | null) ??
+    (metadata?.latestVersion ?? null);
+
+  const remark =
+    (versionData.note as string | null) ??
+    (metadata?.latestRemark ?? null);
+
+  return { file, version, remark, selectedKeys };
 }
 

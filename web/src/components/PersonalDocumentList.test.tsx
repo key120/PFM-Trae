@@ -1,10 +1,11 @@
 import { describe, expect, it, vi } from 'vitest';
-import { render, screen, waitFor, act } from '@testing-library/react';
-import userEvent from '@testing-library/user-event';
-import { message } from 'antd';
+import { render, screen, waitFor, act, within } from '@testing-library/react';
+import '@testing-library/jest-dom/vitest';import userEvent from '@testing-library/user-event';
+import { message, Modal } from 'antd';
 import PersonalDocumentList from './PersonalDocumentList';
 import * as documentService from '../services/documentService';
 import * as cryptoKeyService from '../services/cryptoKeyService';
+import * as teamService from '../services/teamService';
 
 const mockAuthState = {
   user: { id: 'user-1', email: 'tester@example.com' },
@@ -34,6 +35,18 @@ vi.mock('../services/documentService');
 vi.mock('../services/cryptoKeyService', () => ({
   ensureUserKeyPair: vi.fn(),
   restoreUserPrivateKey: vi.fn(),
+}));
+vi.mock('../services/teamService', () => ({
+  fetchTeamGroups: vi.fn(),
+  fetchTeamMembers: vi.fn(),
+}));
+
+const mockTeamState = {
+  currentTeamId: 'team-1',
+};
+
+vi.mock('../store/useTeamStore', () => ({
+  useTeamStore: () => mockTeamState,
 }));
 
 describe('PersonalDocumentList', () => {
@@ -95,7 +108,7 @@ describe('PersonalDocumentList', () => {
     expect(screen.getByText('备注：第一次保存')).toBeTruthy();
   });
 
-  it('共享按钮切换文案并控制共享设置弹窗', async () => {
+  it('共享按钮打开弹窗，关闭后保持未共享状态', async () => {
     const user = userEvent.setup();
     const loader = vi.fn().mockResolvedValue([
       {
@@ -106,6 +119,10 @@ describe('PersonalDocumentList', () => {
         updatedAt: '2025-01-02T00:00:00Z',
       },
     ]);
+
+    vi.mocked(documentService.isDocumentSharedInTeam).mockResolvedValue(false);
+    vi.mocked(teamService.fetchTeamGroups).mockResolvedValue([]);
+    vi.mocked(teamService.fetchTeamMembers).mockResolvedValue([]);
 
     render(<PersonalDocumentList open loader={loader} />);
 
@@ -120,11 +137,13 @@ describe('PersonalDocumentList', () => {
       expect(screen.getByText('共享设置')).toBeTruthy();
     });
 
-    expect(screen.getByRole('button', { name: '取消共享' })).toBeTruthy();
+    expect(screen.queryByRole('button', { name: '取消共享' })).toBeNull();
 
     await user.click(screen.getByRole('button', { name: /关.*闭/ }));
 
-    await user.click(screen.getByRole('button', { name: '取消共享' }));
+    await waitFor(() => {
+      expect(screen.queryByRole('dialog', { name: '共享设置' })).toBeNull();
+    });
 
     expect(screen.getByRole('button', { name: /共.*享/ })).toBeTruthy();
   });
@@ -364,54 +383,178 @@ describe('PersonalDocumentList', () => {
     consoleErrorSpy.mockRestore();
   });
 
-  it('版本下拉条目中展示版本大小', async () => {
-    const user = userEvent.setup();
+  it('按当前团队共享状态显示“共享/取消共享”按钮文案', async () => {
     const loader = vi.fn().mockResolvedValue([
       {
         id: 'doc-1',
-        name: '测试文档',
-        size: 2048,
+        name: '文档A',
+        size: 1024,
         createdAt: '2025-01-01T00:00:00Z',
-        updatedAt: '2025-01-02T00:00:00Z',
-        version: 'V1.1.0',
-        remark: '第二次',
-        versions: [
-          {
-            version: 'V1.1.0',
-            remark: '第二次',
-            author: 'tester@example.com',
-            createdAt: '2025-01-02T00:00:00Z',
-            sizeBytes: 2048,
-          },
-          {
-            version: 'V1.0.0',
-            remark: '第一次',
-            author: 'tester@example.com',
-            createdAt: '2025-01-01T00:00:00Z',
-            sizeBytes: 1024,
-          },
-        ],
+        updatedAt: '2025-01-01T00:00:00Z',
+      },
+      {
+        id: 'doc-2',
+        name: '文档B',
+        size: 1024,
+        createdAt: '2025-01-01T00:00:00Z',
+        updatedAt: '2025-01-01T00:00:00Z',
       },
     ]);
+
+    vi.mocked(documentService.isDocumentSharedInTeam)
+      .mockResolvedValueOnce(true)
+      .mockResolvedValueOnce(false);
 
     render(<PersonalDocumentList open loader={loader} />);
 
     await waitFor(() => {
-      expect(screen.getByText('测试文档')).toBeTruthy();
+      expect(screen.getByText('文档A')).toBeTruthy();
+      expect(screen.getByText('文档B')).toBeTruthy();
     });
 
-    // 点击版本号展开下拉
-    await user.click(screen.getByText(/版本号：V1\.1\.0/));
+    expect(screen.getAllByRole('button', { name: /取消共享/ }).length).toBe(1);
+    expect(screen.getAllByRole('button', { name: /共 享/ }).length).toBe(1);
+  });
+
+  it('共享弹窗左侧勾选成员组/成员后，右侧按层级只读展示且无复选框', async () => {
+    const user = userEvent.setup();
+    const loader = vi.fn().mockResolvedValue([
+      {
+        id: 'doc-1',
+        name: '文档A',
+        size: 1024,
+        createdAt: '2025-01-01T00:00:00Z',
+        updatedAt: '2025-01-01T00:00:00Z',
+      },
+    ]);
+
+    vi.mocked(teamService.fetchTeamGroups).mockResolvedValue([
+      { id: 'group-a', name: '研发组' },
+    ]);
+    vi.mocked(teamService.fetchTeamMembers).mockResolvedValue([
+      { id: 'm1', userId: 'user-a', name: '张三', email: 'a@test.com', role: 'reader', groupId: 'group-a', groupName: '研发组' },
+      { id: 'm2', userId: 'user-b', name: '李四', email: 'b@test.com', role: 'editor', groupId: 'group-a', groupName: '研发组' },
+      { id: 'm3', userId: 'user-c', name: '王五', email: 'c@test.com', role: 'reader', groupId: null, groupName: null },
+    ]);
+
+    vi.mocked(documentService.isDocumentSharedInTeam).mockResolvedValue(false);
+
+    render(<PersonalDocumentList open loader={loader} />);
 
     await waitFor(() => {
-      expect(screen.getByText('最新')).toBeTruthy();
+      expect(screen.getByText('文档A')).toBeTruthy();
     });
 
-    // 两个版本的大小均应显示（下拉中）
-    const sizes = screen.getAllByText(/大小：/);
-    // sizes[0] 是卡片本身的大小，sizes[1] 和 sizes[2] 是下拉中两个版本的大小
-    const sizeTexts = sizes.map((el) => el.textContent ?? '');
-    expect(sizeTexts.some((t) => t.includes('2.0 KB'))).toBe(true);
-    expect(sizeTexts.some((t) => t.includes('1.0 KB'))).toBe(true);
+    await user.click(screen.getByRole('button', { name: /共.*享/ }));
+
+    await waitFor(() => {
+      expect(screen.getByText('共享设置')).toBeTruthy();
+      expect(screen.getByText('研发组')).toBeTruthy();
+      expect(screen.getByText('王五')).toBeTruthy();
+    });
+
+    const groupCheckbox = screen.getByRole('checkbox', { name: '研发组' });
+    await user.click(groupCheckbox);
+
+    const selectedPanel = screen.getByText('已选目标').closest('div') as HTMLElement;
+
+    await waitFor(() => {
+      expect(within(selectedPanel).getByText('研发组')).toBeTruthy();
+      expect(within(selectedPanel).getByText('张三')).toBeTruthy();
+      expect(within(selectedPanel).getByText('李四')).toBeTruthy();
+    });
+
+    expect(selectedPanel.querySelectorAll('input[type="checkbox"]').length).toBe(0);
+  });
+
+
+
+  it('确认共享时会排除当前用户本人，避免把 owner 自己作为共享目标再次提交', async () => {
+    const user = userEvent.setup();
+    const loader = vi.fn().mockResolvedValue([
+      {
+        id: 'doc-1',
+        name: '文档A',
+        size: 1024,
+        createdAt: '2025-01-01T00:00:00Z',
+        updatedAt: '2025-01-01T00:00:00Z',
+      },
+    ]);
+
+    vi.mocked(teamService.fetchTeamGroups).mockResolvedValue([
+      { id: 'group-a', name: '研发组' },
+    ]);
+    vi.mocked(teamService.fetchTeamMembers).mockResolvedValue([
+      { id: 'm-owner', userId: 'user-1', name: '我自己', email: 'tester@example.com', role: 'admin', groupId: 'group-a', groupName: '研发组' },
+      { id: 'm2', userId: 'user-b', name: '李四', email: 'b@test.com', role: 'editor', groupId: 'group-a', groupName: '研发组' },
+    ]);
+    vi.mocked(documentService.isDocumentSharedInTeam).mockResolvedValue(false);
+    vi.mocked(documentService.shareDocument).mockResolvedValue({
+      distributed: ['user-b'],
+      failed: [],
+    });
+
+    render(<PersonalDocumentList open loader={loader} />);
+
+    await waitFor(() => {
+      expect(screen.getByText('文档A')).toBeTruthy();
+    });
+
+    await user.click(screen.getByRole('button', { name: /共.*享/ }));
+    await user.click(await screen.findByRole('checkbox', { name: '研发组' }));
+    await user.click(screen.getByRole('button', { name: '确认共享' }));
+
+    await waitFor(() => {
+      expect(documentService.shareDocument).toHaveBeenCalledWith({
+        documentId: 'doc-1',
+        ownerUserId: 'user-1',
+        targetUserIds: ['user-b'],
+        teamId: 'team-1',
+      });
+    });
+  });
+
+  it('点击取消共享后会排除当前用户本人，仅撤销其他团队成员并传入 teamId', async () => {
+    const user = userEvent.setup();
+    const loader = vi.fn().mockResolvedValue([
+      {
+        id: 'doc-1',
+        name: '文档A',
+        size: 1024,
+        createdAt: '2025-01-01T00:00:00Z',
+        updatedAt: '2025-01-01T00:00:00Z',
+      },
+    ]);
+
+    vi.mocked(documentService.isDocumentSharedInTeam).mockResolvedValue(true);
+    vi.mocked(documentService.unshareDocument).mockResolvedValue(undefined);
+    vi.mocked(teamService.fetchTeamMembers).mockResolvedValue([
+      { id: 'm-owner', userId: 'user-1', name: '我自己', email: 'tester@example.com', role: 'admin', groupId: null, groupName: null },
+      { id: 'm2', userId: 'user-a', name: '张三', email: 'a@test.com', role: 'reader', groupId: null, groupName: null },
+      { id: 'm3', userId: 'user-b', name: '李四', email: 'b@test.com', role: 'editor', groupId: null, groupName: null },
+      { id: 'm4', userId: null, name: '访客', email: 'guest@test.com', role: 'reader', groupId: null, groupName: null },
+    ]);
+
+    const confirmSpy = vi.spyOn(Modal, 'confirm').mockImplementation(({ onOk }) => {
+      void onOk?.();
+      return {
+        destroy: vi.fn(),
+        update: vi.fn(),
+      } as any;
+    });
+
+    render(<PersonalDocumentList open loader={loader} />);
+
+    await waitFor(() => {
+      expect(screen.getByText('文档A')).toBeTruthy();
+    });
+
+    await user.click(screen.getByRole('button', { name: '取消共享' }));
+
+    await waitFor(() => {
+      expect(documentService.unshareDocument).toHaveBeenCalledWith('doc-1', ['user-a', 'user-b'], 'team-1');
+    });
+
+    confirmSpy.mockRestore();
   });
 });

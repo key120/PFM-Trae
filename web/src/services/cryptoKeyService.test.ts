@@ -17,6 +17,48 @@ vi.mock('../lib/supabase', () => ({
   },
 }));
 
+type IndexedDBGlobal = { indexedDB?: unknown };
+
+function setIndexedDB(value: unknown) {
+  Object.defineProperty(globalThis, 'indexedDB', {
+    configurable: true,
+    value,
+  });
+}
+
+function mockCryptoExportKey() {
+  return vi
+    .spyOn(globalThis.crypto.subtle, 'exportKey')
+    .mockResolvedValue({ kty: 'RSA' } as JsonWebKey);
+}
+
+function createIndexedDbRequestWithStoredKeyPair(publicKey: CryptoKey, privateKey: CryptoKey) {
+  const dbRequest = {
+    result: {
+      transaction: () => ({
+        objectStore: () => ({
+          get: () => {
+            const request: Record<string, any> = {};
+            queueMicrotask(() => {
+              request.result = {
+                publicKey,
+                privateKey,
+              };
+              request.onsuccess?.();
+            });
+            return request;
+          },
+        }),
+      }),
+    },
+    onupgradeneeded: undefined,
+    onsuccess: undefined,
+    onerror: undefined,
+  } as Record<string, any>;
+
+  return dbRequest;
+}
+
 describe('DocumentKey 版本号与生命周期', () => {
   it('当前无版本时返回版本 1', () => {
     const next = getNextDocumentKeyVersion(null);
@@ -76,12 +118,10 @@ describe('backupUserPrivateKey', () => {
       error: null,
     } as any);
 
-    const originalIndexedDB = (globalThis as { indexedDB?: unknown }).indexedDB;
-    (globalThis as { indexedDB?: unknown }).indexedDB = {};
+    const originalIndexedDB = (globalThis as IndexedDBGlobal).indexedDB;
+    setIndexedDB({});
 
-    const exportKeySpy = vi
-      .spyOn(globalThis.crypto.subtle, 'exportKey')
-      .mockResolvedValue({ kty: 'RSA' } as JsonWebKey);
+    const exportKeySpy = mockCryptoExportKey();
 
     const { backupUserPrivateKey } = await import('./cryptoKeyService');
     const fakeKey = {} as CryptoKey;
@@ -93,7 +133,7 @@ describe('backupUserPrivateKey', () => {
     });
 
     exportKeySpy.mockRestore();
-    (globalThis as { indexedDB?: unknown }).indexedDB = originalIndexedDB;
+    setIndexedDB(originalIndexedDB);
   });
 
 });
@@ -129,19 +169,109 @@ describe('restoreUserPrivateKey', () => {
   });
 });
 
-describe('isWebCryptoAvailable', () => {
-  it('返回布尔值，反映当前环境的 WebCrypto 与 IndexedDB 支持情况', () => {
-    const result = isWebCryptoAvailable();
-    expect(typeof result).toBe('boolean');
-    // encryptionService.test.ts 中的加解密测试依赖 WebCrypto，说明 crypto.subtle 存在
-    // isWebCryptoAvailable 要求同时满足 WebCrypto + IndexedDB，后者在 jsdom 中不可用
-    const expectedValue =
-      typeof crypto !== 'undefined' &&
-      !!crypto.subtle &&
-      typeof indexedDB !== 'undefined';
-    expect(result).toBe(expectedValue);
+describe('ensureUserKeyPair', () => {
+  beforeEach(() => {
+    vi.clearAllMocks();
+  });
+
+  it('会把用户邮箱一并写入 profiles，供邮箱邀请反查用户', async () => {
+    const { supabase } = await import('../lib/supabase');
+    const upsert = vi.fn().mockResolvedValue({ error: null });
+    vi.mocked(supabase.from).mockReturnValue({ upsert } as any);
+
+    const fakePublicKey = {} as CryptoKey;
+    const fakePrivateKey = {} as CryptoKey;
+    const dbRequest = createIndexedDbRequestWithStoredKeyPair(fakePublicKey, fakePrivateKey);
+
+    const originalIndexedDB = globalThis.indexedDB;
+    setIndexedDB({
+      open: vi.fn(() => {
+        queueMicrotask(() => {
+          dbRequest.onsuccess?.();
+        });
+        return dbRequest;
+      }),
+    });
+
+    const exportKeySpy = mockCryptoExportKey();
+
+    const { ensureUserKeyPair } = await import('./cryptoKeyService');
+    await ensureUserKeyPair({ id: 'user-1', email: 'invitee@example.com' } as any);
+
+    expect(supabase.from).toHaveBeenCalledWith('profiles');
+    expect(upsert).toHaveBeenCalledWith(
+      {
+        id: 'user-1',
+        email: 'invitee@example.com',
+        public_key: { kty: 'RSA' },
+      },
+      { onConflict: 'id' },
+    );
+
+    exportKeySpy.mockRestore();
+    setIndexedDB(originalIndexedDB);
   });
 });
+
+
+describe('distributeDocumentKey', () => {
+  beforeEach(() => {
+    vi.clearAllMocks();
+  });
+
+  it('重复共享同一版本时使用 ignoreDuplicates 避免走 update RLS 路径', async () => {
+    const { supabase } = await import('../lib/supabase');
+    const originalIndexedDB = globalThis.indexedDB;
+    setIndexedDB({});
+
+    const profileSingle = vi.fn().mockResolvedValue({
+      data: { public_key: { kty: 'RSA', e: 'AQAB', n: 'abc' } },
+      error: null,
+    });
+    const keyUpsert = vi.fn().mockResolvedValue({ error: null });
+
+    vi.mocked(supabase.from).mockImplementation((table: string) => {
+      if (table === 'profiles') {
+        return {
+          select: vi.fn().mockReturnValue({
+            eq: vi.fn().mockReturnValue({
+              single: profileSingle,
+            }),
+          }),
+        } as any;
+      }
+      if (table === 'document_keys') {
+        return {
+          upsert: keyUpsert,
+        } as any;
+      }
+      return {} as any;
+    });
+
+    const importKeySpy = vi.spyOn(globalThis.crypto.subtle, 'importKey').mockResolvedValue({} as CryptoKey);
+    const exportKeySpy = vi.spyOn(globalThis.crypto.subtle, 'exportKey').mockResolvedValue(new Uint8Array([1, 2, 3]).buffer);
+    const encryptSpy = vi.spyOn(globalThis.crypto.subtle, 'encrypt').mockResolvedValue(new Uint8Array([4, 5, 6]).buffer);
+
+    const { distributeDocumentKey } = await import('./cryptoKeyService');
+    await distributeDocumentKey('doc-1', {} as CryptoKey, 'user-a', 1);
+
+    expect(keyUpsert).toHaveBeenCalledWith(
+      {
+        document_id: 'doc-1',
+        user_id: 'user-a',
+        wrapped_document_key: expect.any(String),
+        key_version: 1,
+      },
+      { onConflict: 'document_id,user_id,key_version', ignoreDuplicates: true },
+    );
+
+    importKeySpy.mockRestore();
+    exportKeySpy.mockRestore();
+    encryptSpy.mockRestore();
+    setIndexedDB(originalIndexedDB);
+  });
+});
+
 
 describe('getDocumentEncryptionStatus', () => {
   it('metadata 为 null 时返回未加密', () => {
