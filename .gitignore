@@ -1,6 +1,21 @@
 # 忽略 docs 文件夹
 docs/
 
+# 忽略测试文档
+1.docx
+
+# 忽略 Supabase 配置
+supabase/
+
+# 忽略 CLAUDE 配置
+CLAUDE.md
+
+# 忽略 Trae 配置
+.trae/
+
+# 忽略 Claude 配置
+.claude/
+
 # 依赖
 node_modules/
 
