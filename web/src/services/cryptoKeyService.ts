@@ -437,7 +437,7 @@ export const distributeDocumentKey = async (
       wrapped_document_key: wrappedDocumentKey,
       key_version: keyVersion,
     },
-    { onConflict: 'document_id,user_id,key_version', ignoreDuplicates: true },
+    { onConflict: 'document_id,user_id,key_version' },
   );
 
   if (error) {

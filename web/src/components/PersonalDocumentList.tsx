@@ -4,7 +4,7 @@ import { useAuthStore } from '../store/useAuthStore';
 import { useDocStore } from '../store/useDocStore';
 import { useTeamStore } from '../store/useTeamStore';
 import {
-  fetchPersonalDocuments,
+  fetchPersonalDocumentsForCurrentTeam,
   isDocumentSharedInTeam,
   loadPersonalDocument,
   PersonalDocument,
@@ -44,14 +44,34 @@ const formatSize = (value: number | null | undefined) => {
   return `${value} B`;
 };
 
-const PersonalDocumentList: React.FC<PersonalDocumentListProps> = ({ open, loader = fetchPersonalDocuments, onLoaded }) => {
+const PersonalDocumentList: React.FC<PersonalDocumentListProps> = ({ open, loader, onLoaded }) => {
   const { user } = useAuthStore();
+  const userId = user?.id ?? null;
+  const userEmail = user?.email ?? null;
   const { currentTeamId } = useTeamStore();
-  const { setFile, setCurrentDocumentId, setCurrentDocumentVersion, setInitialCheckedKeys } = useDocStore();
+  const {
+    setFile,
+    setCurrentDocumentId,
+    setCurrentDocumentVersion,
+    setInitialCheckedKeys,
+    setDocumentMode,
+    setDocumentAccessRole,
+    setCurrentTeamScopedShare,
+  } = useDocStore();
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [documents, setDocuments] = useState<PersonalDocument[]>([]);
   const [loadingDocumentId, setLoadingDocumentId] = useState<string | null>(null);
+
+  const loadPersonalDocs = React.useCallback(
+    (targetUserId: string) => {
+      if (loader) {
+        return loader(targetUserId);
+      }
+      return fetchPersonalDocumentsForCurrentTeam(targetUserId, currentTeamId);
+    },
+    [loader, currentTeamId],
+  );
   const [shareModalDoc, setShareModalDoc] = useState<PersonalDocument | null>(null);
   const [shareStatusByDocId, setShareStatusByDocId] = useState<Record<string, boolean>>({});
   const [shareTargetLoading, setShareTargetLoading] = useState(false);
@@ -61,7 +81,7 @@ const PersonalDocumentList: React.FC<PersonalDocumentListProps> = ({ open, loade
   const [selectedMemberIds, setSelectedMemberIds] = useState<string[]>([]);
 
   useEffect(() => {
-    if (!open || !user) {
+    if (!open || !userId) {
       return;
     }
 
@@ -71,7 +91,7 @@ const PersonalDocumentList: React.FC<PersonalDocumentListProps> = ({ open, loade
       try {
         setLoading(true);
         setError(null);
-        const list = await loader(user.id);
+        const list = await loadPersonalDocs(userId);
         if (!active) {
           return;
         }
@@ -107,30 +127,30 @@ const PersonalDocumentList: React.FC<PersonalDocumentListProps> = ({ open, loade
     };
 
     const handleChanged = () => {
-      if (!active || !user) {
+      if (!active || !userId) {
         return;
       }
-      load();
+      void load();
     };
 
-    load();
+    void load();
     window.addEventListener('personalDocumentsChanged', handleChanged);
 
     return () => {
       active = false;
       window.removeEventListener('personalDocumentsChanged', handleChanged);
     };
-  }, [open, user, loader, currentTeamId]);
+  }, [open, userId, currentTeamId, loadPersonalDocs]);
 
   const handleRetry = () => {
-    if (!user) {
+    if (!userId) {
       return;
     }
 
     setLoading(true);
     setError(null);
 
-    loader(user.id)
+    loadPersonalDocs(userId)
       .then(async (list) => {
         setDocuments(list);
         const entries = await Promise.all(
@@ -336,6 +356,8 @@ const PersonalDocumentList: React.FC<PersonalDocumentListProps> = ({ open, loade
         ...prev,
         [shareModalDoc.id]: result.distributed.length > 0,
       }));
+      window.dispatchEvent(new Event('personalDocumentsChanged'));
+      window.dispatchEvent(new Event('sharedDocumentsChanged'));
       handleCloseShareModal();
     } catch (err) {
       const errMsg = err instanceof Error ? err.message : '共享失败';
@@ -390,6 +412,9 @@ const PersonalDocumentList: React.FC<PersonalDocumentListProps> = ({ open, loade
       setFile(result.file);
       setCurrentDocumentId(item.id);
       setCurrentDocumentVersion(result.version);
+      setDocumentMode('personal');
+      setDocumentAccessRole('owner');
+      setCurrentTeamScopedShare(false);
       message.success('已载入文档');
       if (onLoaded) {
         onLoaded();
@@ -436,7 +461,7 @@ const PersonalDocumentList: React.FC<PersonalDocumentListProps> = ({ open, loade
     return null;
   }
 
-  if (!user) {
+  if (!userId) {
     return <Empty description="请登录后查看个人文档" />;
   }
 
@@ -472,7 +497,7 @@ const PersonalDocumentList: React.FC<PersonalDocumentListProps> = ({ open, loade
     >
       {documents.map((item) => {
         const versionLabel = item.version || '—';
-        const author = user?.email || '当前用户';
+        const author = userEmail || '当前用户';
         const remark = item.remark || '—';
         const dateTime = item.updatedAt || item.createdAt;
         const size = item.size;

@@ -70,13 +70,13 @@ export const parseDocumentHeadings = async (file: File): Promise<HeadingNode[]> 
             for (let i = 1; i < parts.length - 1; i++) {
                 // Remove leading digits (page number of previous entry)
                 // Since we are targeting Chinese titles (starting with "第"), removing digits is safe.
-                let part = parts[i].replace(/^\d+/, '').trim();
+                const part = parts[i].replace(/^\d+/, '').trim();
                 processPotentialTitle(part);
             }
         } else {
             // No tabs, treat as single entry (Title + Space + Page)
             // Handle case where page number is tightly coupled e.g. "Title4"
-            let cleanText = text.replace(/\s*\d+$/, '').trim();
+            const cleanText = text.replace(/\s*\d+$/, '').trim();
             processPotentialTitle(cleanText);
         }
     });

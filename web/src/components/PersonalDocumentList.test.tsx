@@ -7,6 +7,9 @@ import * as documentService from '../services/documentService';
 import * as cryptoKeyService from '../services/cryptoKeyService';
 import * as teamService from '../services/teamService';
 
+type MessageErrorReturn = ReturnType<typeof message.error>;
+type ModalConfirmReturn = ReturnType<typeof Modal.confirm>;
+
 const mockAuthState = {
   user: { id: 'user-1', email: 'tester@example.com' },
 };
@@ -21,6 +24,9 @@ const setFile = vi.fn();
 const setCurrentDocumentId = vi.fn();
 const setCurrentDocumentVersion = vi.fn();
 const setInitialCheckedKeys = vi.fn();
+const setDocumentMode = vi.fn();
+const setDocumentAccessRole = vi.fn();
+const setCurrentTeamScopedShare = vi.fn();
 
 vi.mock('../store/useDocStore', () => ({
   useDocStore: () => ({
@@ -28,6 +34,9 @@ vi.mock('../store/useDocStore', () => ({
     setCurrentDocumentId,
     setCurrentDocumentVersion,
     setInitialCheckedKeys,
+    setDocumentMode,
+    setDocumentAccessRole,
+    setCurrentTeamScopedShare,
   }),
 }));
 
@@ -60,6 +69,16 @@ describe('PersonalDocumentList', () => {
     });
 
     expect(loader).toHaveBeenCalledWith('user-1');
+  });
+
+  it('打开当前团队时使用当前团队范围的个人文档查询', async () => {
+    vi.mocked(documentService.fetchPersonalDocumentsForCurrentTeam).mockResolvedValue([]);
+
+    render(<PersonalDocumentList open />);
+
+    await waitFor(() => {
+      expect(documentService.fetchPersonalDocumentsForCurrentTeam).toHaveBeenCalledWith('user-1', 'team-1');
+    });
   });
 
   it('有数据时展示文档卡片和字段', async () => {
@@ -235,6 +254,9 @@ describe('PersonalDocumentList', () => {
     expect(setCurrentDocumentId).toHaveBeenCalledWith('doc-1');
     expect(setCurrentDocumentVersion).toHaveBeenCalledWith('V1.0.3');
     expect(setInitialCheckedKeys).toHaveBeenCalledWith(['k1', 'k2']);
+    expect(setDocumentMode).toHaveBeenCalledWith('personal');
+    expect(setDocumentAccessRole).toHaveBeenCalledWith('owner');
+    expect(setCurrentTeamScopedShare).toHaveBeenCalledWith(false);
   });
 
   it('首次载入抛出 KEY_NOT_READY 时会初始化密钥并自动重试', async () => {
@@ -357,7 +379,7 @@ describe('PersonalDocumentList', () => {
     restoreMock.mockResolvedValueOnce(null);
 
     const messageErrorSpy = vi.spyOn(message, 'error').mockImplementation(() => {
-      return undefined as any;
+      return undefined as MessageErrorReturn;
     });
     const consoleErrorSpy = vi.spyOn(console, 'error').mockImplementation(() => {
       return undefined;
@@ -514,6 +536,50 @@ describe('PersonalDocumentList', () => {
     });
   });
 
+  it('共享成功后会同时刷新个人文档和共享文档页签', async () => {
+    const user = userEvent.setup();
+    const loader = vi.fn().mockResolvedValue([
+      {
+        id: 'doc-1',
+        name: '文档A',
+        size: 1024,
+        createdAt: '2025-01-01T00:00:00Z',
+        updatedAt: '2025-01-01T00:00:00Z',
+      },
+    ]);
+
+    vi.mocked(teamService.fetchTeamGroups).mockResolvedValue([
+      { id: 'group-a', name: '研发组' },
+    ]);
+    vi.mocked(teamService.fetchTeamMembers).mockResolvedValue([
+      { id: 'm2', userId: 'user-b', name: '李四', email: 'b@test.com', role: 'editor', groupId: 'group-a', groupName: '研发组' },
+    ]);
+    vi.mocked(documentService.isDocumentSharedInTeam).mockResolvedValue(false);
+    vi.mocked(documentService.shareDocument).mockResolvedValue({
+      distributed: ['user-b'],
+      failed: [],
+    });
+
+    const dispatchSpy = vi.spyOn(window, 'dispatchEvent');
+
+    render(<PersonalDocumentList open loader={loader} />);
+
+    await waitFor(() => {
+      expect(screen.getByText('文档A')).toBeTruthy();
+    });
+
+    await user.click(screen.getByRole('button', { name: /共.*享/ }));
+    await user.click(await screen.findByRole('checkbox', { name: '研发组' }));
+    await user.click(screen.getByRole('button', { name: '确认共享' }));
+
+    await waitFor(() => {
+      expect(dispatchSpy).toHaveBeenCalledWith(expect.objectContaining({ type: 'personalDocumentsChanged' }));
+      expect(dispatchSpy).toHaveBeenCalledWith(expect.objectContaining({ type: 'sharedDocumentsChanged' }));
+    });
+
+    dispatchSpy.mockRestore();
+  });
+
   it('点击取消共享后会排除当前用户本人，仅撤销其他团队成员并传入 teamId', async () => {
     const user = userEvent.setup();
     const loader = vi.fn().mockResolvedValue([
@@ -540,7 +606,7 @@ describe('PersonalDocumentList', () => {
       return {
         destroy: vi.fn(),
         update: vi.fn(),
-      } as any;
+      } as ModalConfirmReturn;
     });
 
     render(<PersonalDocumentList open loader={loader} />);

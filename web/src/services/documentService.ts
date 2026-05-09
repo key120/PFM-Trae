@@ -402,6 +402,7 @@ export async function uploadToR2(
 
 /**
  * 向 Edge Function 请求 R2 预签名下载 URL，然后直接 GET 拉取密文 Blob。
+ * 对网络层瞬态错误（如 ERR_CONTENT_LENGTH_MISMATCH）自动重试。
  */
 export async function downloadFromR2(
   documentId: string,
@@ -417,13 +418,32 @@ export async function downloadFromR2(
 
   const sig = signData as R2DownloadSignature;
 
-  const downloadResp = await fetch(sig.url, { method: 'GET' });
+  const maxAttempts = 3;
+  let lastError: unknown;
 
-  if (!downloadResp.ok) {
-    throw new Error(`R2 download failed: ${downloadResp.status} ${downloadResp.statusText}`);
+  for (let attempt = 1; attempt <= maxAttempts; attempt++) {
+    try {
+      const downloadResp = await fetch(sig.url, { method: 'GET' });
+
+      if (!downloadResp.ok) {
+        throw new Error(`R2 download failed: ${downloadResp.status} ${downloadResp.statusText}`);
+      }
+
+      return downloadResp.blob();
+    } catch (err) {
+      lastError = err;
+      // 仅对网络层瞬态错误重试，HTTP 错误（如 403/404）不重试
+      const isTransient = err instanceof TypeError
+        || (err instanceof Error && /content.length.mismatch|failed to fetch|network/i.test(err.message));
+      if (!isTransient || attempt === maxAttempts) {
+        throw err;
+      }
+      // 指数退避：1s, 2s
+      await new Promise((r) => setTimeout(r, 1000 * attempt));
+    }
   }
 
-  return downloadResp.blob();
+  throw lastError;
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -768,19 +788,86 @@ export async function unshareDocument(
 
 // ─── 共享文档列表（被共享方视角） ─────────────────────────────────────────────────
 
-export interface SharedDocument {
+export interface SharedDocumentVersionSummary {
+  version: string;
+  remark: string;
+  author: string | null;
+  createdAt: string;
+  sizeBytes?: number | null;
+}
+
+export interface SharedDocumentCard {
   id: string;
   name: string;
   size: number | null;
   sharedAt: string;
   sharedBy: string | null;
-  version?: string | null;
+  version: string | null;
+  remark?: string | null;
+  versions: SharedDocumentVersionSummary[];
+  isOwner: boolean;
 }
 
-export async function fetchSharedDocuments(
+function readVersionSummaries(metadata: DocumentMetadata | null | undefined): VersionInfo[] {
+  if (!metadata || !Array.isArray(metadata.versions)) {
+    return [];
+  }
+  return metadata.versions as VersionInfo[];
+}
+
+export async function fetchDocumentVersionLabels(documentId: string): Promise<string[]> {
+  const { data, error } = await supabase
+    .from('document_versions')
+    .select('version_label')
+    .eq('document_id', documentId)
+    .order('created_at', { ascending: false });
+
+  if (error) {
+    throw error;
+  }
+
+  return (data ?? [])
+    .map((row) => row.version_label as string | null)
+    .filter((value): value is string => Boolean(value));
+}
+
+export async function assertSharedVersionLabelAvailable(
+  documentId: string,
+  nextVersion: string,
+): Promise<void> {
+  const labels = await fetchDocumentVersionLabels(documentId);
+  if (labels.includes(nextVersion)) {
+    throw new Error('版本号已存在，请输入新的版本号');
+  }
+}
+
+export async function fetchPersonalDocumentsForCurrentTeam(
+  userId: string,
+  teamId: string | null,
+): Promise<PersonalDocument[]> {
+  const docs = await fetchPersonalDocuments(userId);
+  if (!teamId || docs.length === 0) {
+    return docs;
+  }
+
+  const { data: shares, error } = await supabase
+    .from('document_shares')
+    .select('document_id')
+    .eq('team_id', teamId)
+    .in('document_id', docs.map((doc) => doc.id));
+
+  if (error) {
+    throw error;
+  }
+
+  const sharedIds = new Set((shares ?? []).map((row) => row.document_id as string));
+  return docs.filter((doc) => !sharedIds.has(doc.id));
+}
+
+export async function fetchSharedDocumentsForCurrentTeam(
   userId: string,
   teamId: string,
-): Promise<SharedDocument[]> {
+): Promise<SharedDocumentCard[]> {
   const { data: shares, error: sharesError } = await supabase
     .from('document_shares')
     .select('document_id, shared_by, created_at')
@@ -794,70 +881,253 @@ export async function fetchSharedDocuments(
     return [];
   }
 
-  const { data: keys, error: keysError } = await supabase
-    .from('document_keys')
-    .select('document_id')
-    .eq('user_id', userId);
-
-  if (keysError) {
-    throw keysError;
-  }
-
-  const accessibleDocIds = new Set((keys ?? []).map((k) => k.document_id as string));
-
-  // 排除自己共享给他人的文档（"共享文档"页签只显示别人共享给自己的）
-  const relevantShares = shares.filter(
-    (s) => s.shared_by !== userId && accessibleDocIds.has(s.document_id as string),
-  );
-
-  if (relevantShares.length === 0) {
-    return [];
-  }
-
-  const docIds = relevantShares.map((s) => s.document_id as string);
+  const docIds = Array.from(new Set(shares.map((share) => share.document_id as string)));
   const { data: docs, error: docsError } = await supabase
     .from('documents')
-    .select('id, encrypted_title, size, metadata')
+    .select('id, owner_id, encrypted_title, size, metadata')
     .in('id', docIds);
 
   if (docsError) {
     throw docsError;
   }
 
-  const shareByDocId = new Map(
-    relevantShares.map((s) => [s.document_id as string, s]),
-  );
+  const shareByDocId = new Map(shares.map((share) => [share.document_id as string, share]));
+  const accessibleDocIds = new Set<string>();
 
-  const ownerIds = Array.from(new Set(
-    relevantShares
-      .map((s) => s.shared_by as string)
-      .filter(Boolean),
-  ));
+  for (const doc of docs ?? []) {
+    const ownerId = doc.owner_id as string | null;
+    if (ownerId === userId) {
+      accessibleDocIds.add(doc.id as string);
+      continue;
+    }
 
-  let ownerEmailMap = new Map<string, string>();
-  if (ownerIds.length > 0) {
-    const { data: profiles } = await supabase
-      .from('profiles')
-      .select('id, email')
-      .in('id', ownerIds);
-    if (profiles) {
-      ownerEmailMap = new Map(profiles.map((p) => [p.id as string, p.email as string]));
+    const { data: keyRows, error: keyError } = await supabase
+      .from('document_keys')
+      .select('document_id')
+      .eq('document_id', doc.id)
+      .eq('user_id', userId)
+      .limit(1);
+
+    if (keyError) {
+      throw keyError;
+    }
+
+    if (keyRows && keyRows.length > 0) {
+      accessibleDocIds.add(doc.id as string);
     }
   }
 
-  return (docs ?? []).map((doc) => {
-    const share = shareByDocId.get(doc.id as string);
-    const meta = (doc.metadata as DocumentMetadata | null) ?? null;
-    const sharedById = share?.shared_by as string | null;
-    return {
-      id: doc.id as string,
-      name: (doc.encrypted_title as string) || '未命名文档',
-      size: typeof doc.size === 'number' ? doc.size : null,
-      sharedAt: (share?.created_at as string) || '',
-      sharedBy: sharedById ? (ownerEmailMap.get(sharedById) || sharedById) : null,
-      version: meta?.latestVersion ?? null,
-    };
+  const ownerIds = Array.from(new Set(
+    (shares ?? [])
+      .map((share) => share.shared_by as string | null)
+      .filter((value): value is string => Boolean(value)),
+  ));
+
+  const { data: profiles } = ownerIds.length
+    ? await supabase.from('profiles').select('id, email').in('id', ownerIds)
+    : { data: [] };
+
+  const emailMap = new Map((profiles ?? []).map((row) => [row.id as string, row.email as string]));
+
+  return (docs ?? [])
+    .filter((doc) => accessibleDocIds.has(doc.id as string))
+    .map((doc) => {
+      const metadata = (doc.metadata as DocumentMetadata | null) ?? null;
+      const versions = readVersionSummaries(metadata);
+      const share = shareByDocId.get(doc.id as string);
+      const sharedById = share?.shared_by as string | null;
+
+      return {
+        id: doc.id as string,
+        name: (doc.encrypted_title as string) || '未命名文档',
+        size: typeof doc.size === 'number' ? doc.size : doc.size === null ? null : Number(doc.size) || null,
+        sharedAt: (share?.created_at as string) || '',
+        sharedBy: sharedById ? emailMap.get(sharedById) || sharedById : null,
+        version: metadata?.latestVersion ?? null,
+        remark: metadata?.latestRemark ?? null,
+        versions,
+        isOwner: (doc.owner_id as string | null) === userId,
+      };
+    })
+    .sort((a, b) => new Date(b.sharedAt).getTime() - new Date(a.sharedAt).getTime());
+}
+
+export type SharedDocument = SharedDocumentCard;
+export const fetchSharedDocuments = fetchSharedDocumentsForCurrentTeam;
+
+interface SaveSharedDocumentVersionInput {
+  documentId: string;
+  editorUserId: string;
+  editorEmail: string | null;
+  teamId: string;
+  blob: Blob;
+  fileName: string;
+  version: string;
+  remark: string;
+  selectedKeys: string[];
+}
+
+interface SaveSharedDocumentVersionResult {
+  documentId: string;
+}
+
+export async function saveSharedDocumentVersion(
+  input: SaveSharedDocumentVersionInput,
+): Promise<SaveSharedDocumentVersionResult> {
+  if (!isWebCryptoAvailable()) {
+    throw new Error('当前浏览器不支持 Web Crypto API，无法保存共享文档');
+  }
+
+  await assertSharedVersionLabelAvailable(input.documentId, input.version);
+
+  const { data: documentRow, error: documentError } = await supabase
+    .from('documents')
+    .select('id, owner_id, encrypted_title, metadata')
+    .eq('id', input.documentId)
+    .single();
+
+  if (documentError || !documentRow) {
+    throw documentError || new Error('共享文档不存在');
+  }
+
+  const { data: shareRows, error: shareError } = await supabase
+    .from('document_shares')
+    .select('document_id')
+    .eq('document_id', input.documentId)
+    .eq('team_id', input.teamId)
+    .limit(1);
+
+  if (shareError || !shareRows || shareRows.length === 0) {
+    throw new Error('共享权限已失效，请重新载入后重试');
+  }
+
+  const { data: currentKeyRows, error: keyError } = await supabase
+    .from('document_keys')
+    .select('wrapped_document_key, key_version')
+    .eq('document_id', input.documentId)
+    .eq('user_id', input.editorUserId)
+    .order('key_version', { ascending: false })
+    .limit(1);
+
+  if (keyError || !currentKeyRows || currentKeyRows.length === 0) {
+    throw new Error('共享权限已失效，请重新载入后重试');
+  }
+
+  let editorKeyPair = await getUserKeyPair(input.editorUserId);
+  if (!editorKeyPair) {
+    await restoreUserPrivateKey();
+    editorKeyPair = await getUserKeyPair(input.editorUserId);
+  }
+  if (!editorKeyPair) {
+    throw new Error('未找到用户密钥，请重新登录后重试');
+  }
+
+  const currentRow = currentKeyRows[0] as { wrapped_document_key: string; key_version: number };
+  const nextKeyVersion = currentRow.key_version + 1;
+
+  await backupUserPrivateKey(editorKeyPair.privateKey, nextKeyVersion);
+
+  const nextDocumentKey = await generateDocumentKey();
+  const editorWrappedKey = await wrapDocumentKey(nextDocumentKey, editorKeyPair.publicKey);
+  const versionId = generateVersionId();
+  const { blob: encryptedBlob, contentHash } = await encryptDocumentChunked({
+    file: input.blob,
+    key: nextDocumentKey,
+    meta: {
+      title: input.fileName,
+      remark: input.remark,
+      selectedKeys: input.selectedKeys,
+      originalFileName: input.fileName,
+      mimeType: 'application/vnd.openxmlformats-officedocument.wordprocessingml.document',
+    },
   });
+
+  const r2Key = await uploadToR2(input.documentId, versionId, contentHash, encryptedBlob);
+  const size = encryptedBlob.size;
+  const now = new Date().toISOString();
+  const metadata = (documentRow.metadata as DocumentMetadata | null) ?? null;
+  const existingVersions = readVersionSummaries(metadata);
+  const versionEntry: VersionInfo = {
+    version: input.version,
+    remark: input.remark,
+    author: input.editorEmail,
+    createdAt: now,
+    sizeBytes: size,
+  };
+
+  const { error: insertVersionError } = await supabase.from('document_versions').insert({
+    id: versionId,
+    document_id: input.documentId,
+    version_label: input.version,
+    note: input.remark || null,
+    author_id: input.editorUserId,
+    r2_key: r2Key,
+    content_hash: contentHash,
+    encrypted_meta: {
+      title: input.fileName,
+      selectedKeys: input.selectedKeys,
+      keyVersion: nextKeyVersion,
+    },
+    key_version: nextKeyVersion,
+    size_bytes: size,
+  });
+
+  if (insertVersionError) {
+    throw insertVersionError;
+  }
+
+  const { error: updateError } = await supabase
+    .from('documents')
+    .update({
+      encrypted_title: input.fileName,
+      size,
+      path: r2Key,
+      metadata: {
+        ...metadata,
+        latestVersion: input.version,
+        latestRemark: input.remark,
+        versions: [versionEntry, ...existingVersions],
+        selectedKeys: input.selectedKeys,
+        encryption: { enabled: true, version: 2 },
+      },
+      updated_at: now,
+    })
+    .eq('id', input.documentId);
+
+  if (updateError) {
+    throw updateError;
+  }
+
+  const { data: eligibleKeyRows, error: eligibleKeyError } = await supabase
+    .from('document_keys')
+    .select('user_id')
+    .eq('document_id', input.documentId);
+
+  if (eligibleKeyError) {
+    throw eligibleKeyError;
+  }
+
+  const targetUserIds = Array.from(new Set(
+    (eligibleKeyRows ?? [])
+      .map((row) => row.user_id as string | null)
+      .filter((value): value is string => Boolean(value)),
+  ));
+
+  await supabase.from('document_keys').insert({
+    document_id: input.documentId,
+    user_id: input.editorUserId,
+    wrapped_document_key: editorWrappedKey,
+    key_version: nextKeyVersion,
+  });
+
+  for (const targetUserId of targetUserIds) {
+    if (targetUserId === input.editorUserId) {
+      continue;
+    }
+    await distributeDocumentKey(input.documentId, nextDocumentKey, targetUserId, nextKeyVersion);
+  }
+
+  return { documentId: input.documentId };
 }
 
 export async function loadSharedDocument(

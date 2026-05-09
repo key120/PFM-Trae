@@ -7,6 +7,7 @@ interface SaveDocumentModalProps {
   onOk: (values: { version: string; remark: string }) => void;
   onCancel: () => void;
   defaultVersion?: string | null;
+  validateVersion?: (version: string) => Promise<void>;
 }
 
 const SaveDocumentModal: React.FC<SaveDocumentModalProps> = ({
@@ -15,6 +16,7 @@ const SaveDocumentModal: React.FC<SaveDocumentModalProps> = ({
   onOk,
   onCancel,
   defaultVersion,
+  validateVersion,
 }) => {
   const [form] = Form.useForm<{ version: string; remark: string }>();
 
@@ -50,7 +52,17 @@ const SaveDocumentModal: React.FC<SaveDocumentModalProps> = ({
         <Form.Item
           label="版本号"
           name="version"
-          rules={[{ required: true, message: '请输入版本号' }]}
+          rules={[
+            { required: true, message: '请输入版本号' },
+            {
+              validator: async (_, value: string | undefined) => {
+                if (!value || !validateVersion) {
+                  return;
+                }
+                await validateVersion(value.trim());
+              },
+            },
+          ]}
         >
           <Input placeholder="例如：V1.0.0" />
         </Form.Item>

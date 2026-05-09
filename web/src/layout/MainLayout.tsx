@@ -55,7 +55,6 @@ const MainLayout: React.FC = () => {
         if (!active) {
           return;
         }
-        setTeams(nextTeams);
 
         const savedTeamId = currentTeamStorageKey
           ? window.localStorage.getItem(currentTeamStorageKey)
@@ -63,6 +62,8 @@ const MainLayout: React.FC = () => {
         if (savedTeamId && nextTeams.some((team) => team.id === savedTeamId)) {
           setCurrentTeamId(savedTeamId);
         }
+
+        setTeams(nextTeams);
       } catch (error) {
         if (!active) {
           return;
@@ -113,13 +114,18 @@ const MainLayout: React.FC = () => {
       return;
     }
 
+    const storedTeamId = window.localStorage.getItem(currentTeamStorageKey);
+
     if (currentTeamId) {
-      const storedTeamId = window.localStorage.getItem(currentTeamStorageKey);
       if (storedTeamId === currentTeamId) {
         return;
       }
 
       window.localStorage.setItem(currentTeamStorageKey, currentTeamId);
+      return;
+    }
+
+    if (storedTeamId) {
       return;
     }
 

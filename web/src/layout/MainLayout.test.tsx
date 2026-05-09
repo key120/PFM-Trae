@@ -96,7 +96,7 @@ describe('MainLayout 文档列表 Drawer', () => {
     expect(screen.getByRole('tab', { name: '共享文档' })).toBeTruthy();
   });
 
-  it('切换到共享 Tabs 后显示共享占位', async () => {
+  it('切换到共享 Tabs 后在未选择团队时显示提示', async () => {
     const user = userEvent.setup();
 
     renderMainLayout();
@@ -104,7 +104,7 @@ describe('MainLayout 文档列表 Drawer', () => {
     await user.click(screen.getByRole('button', { name: /文档列表/ }));
     await user.click(await screen.findByRole('tab', { name: '共享文档' }));
 
-    expect(await screen.findByText('共享文档功能开发中')).toBeTruthy();
+    expect(await screen.findByText('请先选择团队后查看共享文档')).toBeTruthy();
   });
 });
 
@@ -398,12 +398,12 @@ describe('MainLayout 团队菜单', () => {
     localStorageSpy.mockRestore();
   });
 
-  it('currentTeamId 未变化时不重复写入 localStorage', async () => {
-    mockTeamState.currentTeamId = 'team-2';
-    mockFetchUserTeams.mockResolvedValue([
+  it('恢复上次选中的团队时，不会先回退到团队列表首项', async () => {
+    const nextTeams = [
       { id: 'team-1', name: '团队 A' },
       { id: 'team-2', name: '团队 B' },
-    ]);
+    ];
+    mockFetchUserTeams.mockResolvedValue(nextTeams);
     mockStorageGetItem.mockReturnValue('team-2');
 
     const localStorageSpy = vi.spyOn(window, 'localStorage', 'get').mockReturnValue({
@@ -418,10 +418,70 @@ describe('MainLayout 团队菜单', () => {
     renderMainLayout();
 
     await waitFor(() => {
+      expect(mockTeamState.setCurrentTeamId).toHaveBeenCalledWith('team-2');
+      expect(mockTeamState.setTeams).toHaveBeenCalledWith(nextTeams);
+    });
+
+    expect(mockTeamState.setCurrentTeamId.mock.invocationCallOrder[0]).toBeLessThan(
+      mockTeamState.setTeams.mock.invocationCallOrder[0],
+    );
+
+    localStorageSpy.mockRestore();
+  });
+
+  it('currentTeamId 未变化时不重复写入 localStorage', async () => {
+    mockTeamState.currentTeamId = 'team-2';
+    mockFetchUserTeams.mockResolvedValue([
+      { id: 'team-1', name: '团队 A' },
+      { id: 'team-2', name: '团队 B' },
+    ]);
+    mockStorageGetItem.mockReturnValue('team-2');
+
+    const removeItem = vi.fn();
+    const localStorageSpy = vi.spyOn(window, 'localStorage', 'get').mockReturnValue({
+      getItem: mockStorageGetItem,
+      setItem: mockStorageSetItem,
+      removeItem,
+      clear: vi.fn(),
+      key: vi.fn(),
+      length: 0,
+    } as Storage);
+
+    renderMainLayout();
+
+    await waitFor(() => {
       expect(mockFetchUserTeams).toHaveBeenCalledWith('user-1');
     });
 
     expect(mockStorageSetItem).not.toHaveBeenCalled();
+    expect(removeItem).not.toHaveBeenCalled();
+    localStorageSpy.mockRestore();
+  });
+
+  it('currentTeamId 为空但本地已有已保存团队时，不会提前清除 localStorage', async () => {
+    mockFetchUserTeams.mockResolvedValue([
+      { id: 'team-1', name: '团队 A' },
+      { id: 'team-2', name: '团队 B' },
+    ]);
+    mockStorageGetItem.mockReturnValue('team-2');
+
+    const removeItem = vi.fn();
+    const localStorageSpy = vi.spyOn(window, 'localStorage', 'get').mockReturnValue({
+      getItem: mockStorageGetItem,
+      setItem: mockStorageSetItem,
+      removeItem,
+      clear: vi.fn(),
+      key: vi.fn(),
+      length: 0,
+    } as Storage);
+
+    renderMainLayout();
+
+    await waitFor(() => {
+      expect(mockTeamState.setCurrentTeamId).toHaveBeenCalledWith('team-2');
+    });
+
+    expect(removeItem).not.toHaveBeenCalled();
     localStorageSpy.mockRestore();
   });
 

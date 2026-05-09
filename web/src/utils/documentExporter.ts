@@ -251,7 +251,7 @@ const getHeadingLevel = (pNode: Element, styleMap: Map<string, number>): number 
  * 修改 settings.xml 以强制更新字段 (TOC)
  */
 const updateSettingsForToc = async (zip: JSZip) => {
-  let settingsXml = await zip.file('word/settings.xml')?.async('string');
+  const settingsXml = await zip.file('word/settings.xml')?.async('string');
   const parser = new DOMParser();
   const serializer = new XMLSerializer();
   let doc: Document;

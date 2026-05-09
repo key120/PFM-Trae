@@ -1,14 +1,16 @@
 import React, { useEffect, useState } from 'react';
-import { Alert, Button, Card, Empty, Skeleton, message } from 'antd';
+import { Alert, Button, Card, Dropdown, Empty, Skeleton, Tag, Typography, message } from 'antd';
 import { useAuthStore } from '../store/useAuthStore';
 import { useDocStore } from '../store/useDocStore';
 import { useTeamStore } from '../store/useTeamStore';
 import {
-  fetchSharedDocuments,
+  fetchSharedDocumentsForCurrentTeam,
   loadSharedDocument,
-  SharedDocument,
+  SharedDocumentCard,
+  unshareDocument,
 } from '../services/documentService';
 import { ensureUserKeyPair, restoreUserPrivateKey } from '../services/cryptoKeyService';
+import { fetchTeamMembers } from '../services/teamService';
 
 interface SharedDocumentListProps {
   open: boolean;
@@ -35,14 +37,24 @@ const formatSize = (value: number | null | undefined) => {
 
 const SharedDocumentList: React.FC<SharedDocumentListProps> = ({ open, onLoaded }) => {
   const { user } = useAuthStore();
+  const userId = user?.id ?? null;
+  const userEmail = user?.email ?? null;
   const { currentTeamId } = useTeamStore();
-  const { setFile, setCurrentDocumentId, setCurrentDocumentVersion, setInitialCheckedKeys } = useDocStore();
+  const {
+    setFile,
+    setCurrentDocumentId,
+    setCurrentDocumentVersion,
+    setInitialCheckedKeys,
+    setDocumentMode,
+    setDocumentAccessRole,
+    setCurrentTeamScopedShare,
+  } = useDocStore();
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState<string | null>(null);
-  const [documents, setDocuments] = useState<SharedDocument[]>([]);
+  const [documents, setDocuments] = useState<SharedDocumentCard[]>([]);
   const [loadingDocumentId, setLoadingDocumentId] = useState<string | null>(null);
   useEffect(() => {
-    if (!open || !user || !currentTeamId) {
+    if (!open || !userId || !currentTeamId) {
       return;
     }
 
@@ -52,7 +64,7 @@ const SharedDocumentList: React.FC<SharedDocumentListProps> = ({ open, onLoaded 
       try {
         setLoading(true);
         setError(null);
-        const list = await fetchSharedDocuments(user.id, currentTeamId);
+        const list = await fetchSharedDocumentsForCurrentTeam(userId, currentTeamId);
         if (!active) return;
         setDocuments(list);
       } catch (e: unknown) {
@@ -65,24 +77,24 @@ const SharedDocumentList: React.FC<SharedDocumentListProps> = ({ open, onLoaded 
     };
 
     const handleChanged = () => {
-      if (!active || !user || !currentTeamId) return;
-      load();
+      if (!active || !userId || !currentTeamId) return;
+      void load();
     };
 
-    load();
+    void load();
     window.addEventListener('sharedDocumentsChanged', handleChanged);
 
     return () => {
       active = false;
       window.removeEventListener('sharedDocumentsChanged', handleChanged);
     };
-  }, [open, user, currentTeamId]);
+  }, [open, userId, currentTeamId]);
 
   const handleRetry = () => {
-    if (!user || !currentTeamId) return;
+    if (!userId || !currentTeamId) return;
     setLoading(true);
     setError(null);
-    fetchSharedDocuments(user.id, currentTeamId)
+    fetchSharedDocumentsForCurrentTeam(userId, currentTeamId)
       .then((list) => setDocuments(list))
       .catch((e: unknown) => {
         const msg = e instanceof Error && e.message ? e.message : '加载共享文档失败';
@@ -91,7 +103,7 @@ const SharedDocumentList: React.FC<SharedDocumentListProps> = ({ open, onLoaded 
       .finally(() => setLoading(false));
   };
 
-  const handleLoadDocument = async (item: SharedDocument) => {
+  const handleLoadDocument = async (item: SharedDocumentCard) => {
     if (!user) return;
 
     try {
@@ -115,7 +127,30 @@ const SharedDocumentList: React.FC<SharedDocumentListProps> = ({ open, onLoaded 
     }
   };
 
-  const applyResult = (result: Awaited<ReturnType<typeof loadSharedDocument>>, item: SharedDocument) => {
+  const handleCancelShare = async (item: SharedDocumentCard) => {
+    if (!currentTeamId || !item.isOwner) {
+      return;
+    }
+
+    try {
+      const members = await fetchTeamMembers(currentTeamId);
+      const memberUserIds = Array.from(new Set(
+        members
+          .map((member) => member.userId)
+          .filter((value): value is string => Boolean(value) && value !== userId),
+      ));
+
+      await unshareDocument(item.id, memberUserIds, currentTeamId);
+      window.dispatchEvent(new Event('sharedDocumentsChanged'));
+      window.dispatchEvent(new Event('personalDocumentsChanged'));
+      message.success('已取消当前团队共享');
+    } catch (err) {
+      const errMsg = err instanceof Error && err.message ? err.message : '取消共享失败';
+      message.error(errMsg);
+    }
+  };
+
+  const applyResult = (result: Awaited<ReturnType<typeof loadSharedDocument>>, item: SharedDocumentCard) => {
     if (Array.isArray(result.selectedKeys)) {
       setInitialCheckedKeys(result.selectedKeys);
     } else {
@@ -124,13 +159,16 @@ const SharedDocumentList: React.FC<SharedDocumentListProps> = ({ open, onLoaded 
     setFile(result.file);
     setCurrentDocumentId(item.id);
     setCurrentDocumentVersion(result.version ?? null);
+    setDocumentMode('shared');
+    setDocumentAccessRole(item.isOwner ? 'owner' : 'member');
+    setCurrentTeamScopedShare(true);
     message.success('已载入共享文档');
     if (onLoaded) onLoaded();
   };
 
   if (!open) return null;
 
-  if (!user) {
+  if (!userId) {
     return <Empty description="请登录后查看共享文档" />;
   }
 
@@ -157,31 +195,72 @@ const SharedDocumentList: React.FC<SharedDocumentListProps> = ({ open, onLoaded 
 
   return (
     <div style={{ maxHeight: 'calc(100vh - 200px)', overflowY: 'auto' }}>
-      {documents.map((item) => (
-        <Card key={item.id} size="small" style={{ marginBottom: 12 }}>
-          <div style={{ display: 'flex', justifyContent: 'space-between', gap: 16 }}>
-            <div style={{ flex: 1, minWidth: 0 }}>
-              <div style={{ fontWeight: 500, marginBottom: 4, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>
-                {item.name}
+      {documents.map((item) => {
+        const versions = Array.isArray(item.versions) ? item.versions : [];
+        const versionLabel = item.version || '—';
+        const latestRemark = item.remark || versions[0]?.remark || '—';
+        const sharedBy = item.sharedBy || userEmail || '—';
+
+        return (
+          <Card key={item.id} size="small" style={{ marginBottom: 12 }}>
+            <div style={{ display: 'flex', justifyContent: 'space-between', gap: 16 }}>
+              <div style={{ flex: 1, minWidth: 0 }}>
+                <div style={{ fontWeight: 500, marginBottom: 4, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>
+                  {item.name}
+                </div>
+                <div>
+                  {versions.length > 0 ? (
+                    <Dropdown
+                      trigger={['click']}
+                      menu={{
+                        items: versions.map((version, index) => ({
+                          key: `${item.id}-${index}`,
+                          label: (
+                            <div>
+                              <div>
+                                {version.version} {index === 0 && <Tag color="blue">最新</Tag>}
+                              </div>
+                              <div>备注：{version.remark || '—'}</div>
+                              <div>作者：{version.author || sharedBy}</div>
+                              <div>时间：{formatDateTime(version.createdAt)}</div>
+                              <div>大小：{formatSize(version.sizeBytes)}</div>
+                            </div>
+                          ),
+                        })),
+                      }}
+                    >
+                      <Typography.Text style={{ color: '#1677ff', cursor: 'pointer', userSelect: 'none' }}>
+                        版本号：{versionLabel}
+                      </Typography.Text>
+                    </Dropdown>
+                  ) : (
+                    <span>版本号：{versionLabel}</span>
+                  )}
+                </div>
+                <div>共享者：{sharedBy}</div>
+                <div>共享时间：{formatDateTime(item.sharedAt)}</div>
+                <div>备注：{latestRemark}</div>
+                <div>大小：{formatSize(item.size)}</div>
               </div>
-              {item.version && <div>版本号：{item.version}</div>}
-              <div>共享者：{item.sharedBy || '—'}</div>
-              <div>共享时间：{formatDateTime(item.sharedAt)}</div>
-              <div>大小：{formatSize(item.size)}</div>
+              <div style={{ display: 'flex', flexDirection: 'column', gap: 8 }}>
+                <Button
+                  type="primary"
+                  size="small"
+                  loading={loadingDocumentId === item.id}
+                  onClick={() => handleLoadDocument(item)}
+                >
+                  载入
+                </Button>
+                {item.isOwner && (
+                  <Button size="small" onClick={() => void handleCancelShare(item)}>
+                    取消共享
+                  </Button>
+                )}
+              </div>
             </div>
-            <div style={{ display: 'flex', flexDirection: 'column', gap: 8 }}>
-              <Button
-                type="primary"
-                size="small"
-                loading={loadingDocumentId === item.id}
-                onClick={() => handleLoadDocument(item)}
-              >
-                载入
-              </Button>
-            </div>
-          </div>
-        </Card>
-      ))}
+          </Card>
+        );
+      })}
     </div>
   );
 };

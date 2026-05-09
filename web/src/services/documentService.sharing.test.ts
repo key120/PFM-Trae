@@ -1,7 +1,16 @@
 import { describe, expect, it, vi, beforeEach } from 'vitest';
-import { shareDocument, unshareDocument, isDocumentSharedInTeam } from './documentService';
+import {
+  shareDocument,
+  unshareDocument,
+  isDocumentSharedInTeam,
+  fetchPersonalDocumentsForCurrentTeam,
+  fetchSharedDocumentsForCurrentTeam,
+  assertSharedVersionLabelAvailable,
+  saveSharedDocumentVersion,
+} from './documentService';
 import { supabase } from '../lib/supabase';
 import * as cryptoKeyService from './cryptoKeyService';
+import * as encryptionService from './encryptionService';
 
 type MockFn = ReturnType<typeof vi.fn>;
 
@@ -14,16 +23,20 @@ vi.mock('./cryptoKeyService', () => ({
   unwrapDocumentKey: vi.fn(async () => ({ type: 'secret', algorithm: { name: 'AES-GCM' } })),
   distributeDocumentKey: vi.fn(async () => undefined),
   revokeDocumentKeyAccess: vi.fn(async () => undefined),
-  // 其他导出保持 undefined（不被调用）
-  generateDocumentKey: vi.fn(),
-  wrapDocumentKey: vi.fn(),
+  generateDocumentKey: vi.fn(async () => ({ type: 'secret', algorithm: { name: 'AES-GCM' } })),
+  wrapDocumentKey: vi.fn(async () => 'editor-wrapped-key'),
+  backupUserPrivateKey: vi.fn(async () => true),
+  restoreUserPrivateKey: vi.fn(async () => ({ type: 'private' })),
+  ensureUserKeyPair: vi.fn(async () => undefined),
   getDocumentEncryptionStatus: vi.fn(),
   getTargetUserPublicKey: vi.fn(),
 }));
 
-// encryptionService 不会被 shareDocument 调用，提供空 mock 即可
 vi.mock('./encryptionService', () => ({
-  encryptDocumentChunked: vi.fn(),
+  encryptDocumentChunked: vi.fn(async () => ({
+    blob: new Blob(['encrypted'], { type: 'application/octet-stream' }),
+    contentHash: 'shared-hash',
+  })),
   decryptDocumentChunked: vi.fn(),
 }));
 
@@ -56,6 +69,10 @@ const resetMocks = () => {
   );
   vi.mocked(cryptoKeyService.distributeDocumentKey).mockImplementation(async () => undefined);
   vi.mocked(cryptoKeyService.revokeDocumentKeyAccess).mockImplementation(async () => undefined);
+  vi.mocked(encryptionService.encryptDocumentChunked).mockImplementation(async () => ({
+    blob: new Blob(['encrypted'], { type: 'application/octet-stream' }),
+    contentHash: 'shared-hash',
+  }));
 };
 
 describe('shareDocument', () => {
@@ -305,8 +322,311 @@ describe('unshareDocument', () => {
 
     await unshareDocument('doc-1', ['user-a']);
 
-    // document_shares 不应被调用
     const calls = (fromMock.mock.calls as [string][]).map(([t]) => t);
     expect(calls).not.toContain('document_shares');
+  });
+});
+
+describe('current-team document list queries', () => {
+  beforeEach(resetMocks);
+
+  it('fetchPersonalDocumentsForCurrentTeam excludes docs shared in the current team', async () => {
+    const fromMock = supabase.from as unknown as MockFn;
+
+    fromMock.mockImplementation((table: string) => {
+      if (table === 'documents') {
+        return {
+          select: vi.fn().mockReturnValue({
+            eq: vi.fn().mockReturnValue({
+              order: vi.fn().mockResolvedValue({
+                data: [
+                  {
+                    id: 'doc-personal',
+                    encrypted_title: '个人文档',
+                    size: 1,
+                    path: 'r2://a',
+                    created_at: '2026-05-01T00:00:00Z',
+                    updated_at: '2026-05-01T00:00:00Z',
+                    metadata: { encryption: { enabled: true, version: 2 } },
+                  },
+                  {
+                    id: 'doc-shared',
+                    encrypted_title: '共享出去的文档',
+                    size: 1,
+                    path: 'r2://b',
+                    created_at: '2026-05-01T00:00:00Z',
+                    updated_at: '2026-05-02T00:00:00Z',
+                    metadata: { encryption: { enabled: true, version: 2 } },
+                  },
+                ],
+                error: null,
+              }),
+            }),
+          }),
+        };
+      }
+
+      if (table === 'document_shares') {
+        return {
+          select: vi.fn().mockReturnValue({
+            eq: vi.fn().mockReturnValue({
+              in: vi.fn().mockResolvedValue({
+                data: [{ document_id: 'doc-shared' }],
+                error: null,
+              }),
+            }),
+          }),
+        };
+      }
+
+      return {};
+    });
+
+    const result = await fetchPersonalDocumentsForCurrentTeam('user-1', 'team-1');
+    expect(result.map((doc) => doc.id)).toEqual(['doc-personal']);
+  });
+
+  it('fetchSharedDocumentsForCurrentTeam returns owner-shared and member-shared cards together', async () => {
+    const fromMock = supabase.from as unknown as MockFn;
+
+    fromMock.mockImplementation((table: string) => {
+      if (table === 'document_shares') {
+        return {
+          select: vi.fn().mockReturnValue({
+            eq: vi.fn().mockResolvedValue({
+              data: [
+                { document_id: 'doc-owner', shared_by: 'user-1', created_at: '2026-05-03T00:00:00Z' },
+                { document_id: 'doc-member', shared_by: 'owner-2', created_at: '2026-05-04T00:00:00Z' },
+              ],
+              error: null,
+            }),
+          }),
+        };
+      }
+
+      if (table === 'documents') {
+        return {
+          select: vi.fn().mockReturnValue({
+            in: vi.fn().mockResolvedValue({
+              data: [
+                {
+                  id: 'doc-owner',
+                  owner_id: 'user-1',
+                  encrypted_title: '我共享的文档',
+                  size: 100,
+                  metadata: {
+                    latestVersion: 'V2.0.0',
+                    latestRemark: 'owner update',
+                    versions: [{ version: 'V2.0.0', remark: 'owner update', author: 'tester@example.com', createdAt: '2026-05-03T00:00:00Z', sizeBytes: 100 }],
+                  },
+                },
+                {
+                  id: 'doc-member',
+                  owner_id: 'owner-2',
+                  encrypted_title: '别人共享给我的文档',
+                  size: 200,
+                  metadata: {
+                    latestVersion: 'V3.0.0',
+                    latestRemark: 'member update',
+                    versions: [{ version: 'V3.0.0', remark: 'member update', author: 'owner-2@example.com', createdAt: '2026-05-04T00:00:00Z', sizeBytes: 200 }],
+                  },
+                },
+              ],
+              error: null,
+            }),
+          }),
+        };
+      }
+
+      if (table === 'document_keys') {
+        return {
+          select: vi.fn().mockReturnValue({
+            eq: vi.fn().mockReturnValue({
+              eq: vi.fn().mockReturnValue({
+                limit: vi.fn().mockResolvedValue({
+                  data: [{ document_id: 'doc-member' }],
+                  error: null,
+                }),
+              }),
+            }),
+          }),
+        };
+      }
+
+      if (table === 'profiles') {
+        return {
+          select: vi.fn().mockReturnValue({
+            in: vi.fn().mockResolvedValue({
+              data: [{ id: 'owner-2', email: 'owner-2@example.com' }, { id: 'user-1', email: 'tester@example.com' }],
+              error: null,
+            }),
+          }),
+        };
+      }
+
+      return {};
+    });
+
+    const result = await fetchSharedDocumentsForCurrentTeam('user-1', 'team-1');
+    expect(result).toHaveLength(2);
+    expect(result.find((doc) => doc.id === 'doc-owner')?.isOwner).toBe(true);
+    expect(result.find((doc) => doc.id === 'doc-member')?.isOwner).toBe(false);
+  });
+
+  it('assertSharedVersionLabelAvailable rejects duplicate labels in the full document history', async () => {
+    const fromMock = supabase.from as unknown as MockFn;
+
+    fromMock.mockImplementation((table: string) => {
+      if (table === 'document_versions') {
+        return {
+          select: vi.fn().mockReturnValue({
+            eq: vi.fn().mockReturnValue({
+              order: vi.fn().mockResolvedValue({
+                data: [{ version_label: 'V1.0.0' }, { version_label: 'V1.1.0' }],
+                error: null,
+              }),
+            }),
+          }),
+        };
+      }
+      return {};
+    });
+
+    await expect(assertSharedVersionLabelAvailable('doc-1', 'V1.1.0')).rejects.toThrow('版本号已存在');
+  });
+
+  it('saveSharedDocumentVersion appends a new version and refreshes metadata for all shared members', async () => {
+    const fromMock = supabase.from as unknown as MockFn;
+    const invokeMock = supabase.functions.invoke as unknown as MockFn;
+
+    invokeMock.mockResolvedValue({
+      data: {
+        url: 'https://r2.example.com/shared-put',
+        method: 'PUT',
+        headers: { 'Content-Type': 'application/octet-stream' },
+        expiresAt: new Date(Date.now() + 300000).toISOString(),
+        r2Key: 'pfm-trae/dev/documents/doc-1/new-ver-uuid/hash.bin',
+      },
+      error: null,
+    });
+
+    global.fetch = vi.fn().mockResolvedValue({ ok: true, status: 200 } as Response);
+    vi.mocked(cryptoKeyService.generateDocumentKey).mockResolvedValue({ type: 'secret' } as unknown as CryptoKey);
+    vi.mocked(cryptoKeyService.wrapDocumentKey).mockResolvedValue('editor-wrapped-key');
+    vi.mocked(cryptoKeyService.distributeDocumentKey).mockResolvedValue(undefined);
+
+    const documentSingle = vi.fn().mockResolvedValue({
+      data: {
+        id: 'doc-1',
+        owner_id: 'owner-1',
+        encrypted_title: '共享文档',
+        metadata: {
+          latestVersion: 'V1.0.0',
+          latestRemark: 'old',
+          versions: [{ version: 'V1.0.0', remark: 'old', author: 'owner@example.com', createdAt: '2026-05-01T00:00:00Z', sizeBytes: 100 }],
+          selectedKeys: ['k1'],
+          encryption: { enabled: true, version: 2 },
+        },
+      },
+      error: null,
+    });
+
+    const updateEq = vi.fn().mockResolvedValue({ error: null });
+    const update = vi.fn().mockReturnValue({ eq: updateEq });
+    const insertVersion = vi.fn().mockResolvedValue({ error: null });
+    const insertKeys = vi.fn().mockResolvedValue({ error: null });
+
+    fromMock.mockImplementation((table: string) => {
+      if (table === 'documents') {
+        return {
+          select: vi.fn().mockReturnValue({
+            eq: vi.fn().mockReturnValue({ single: documentSingle }),
+          }),
+          update,
+        };
+      }
+
+      if (table === 'document_shares') {
+        return {
+          select: vi.fn().mockReturnValue({
+            eq: vi.fn().mockReturnValue({
+              eq: vi.fn().mockReturnValue({
+                limit: vi.fn().mockResolvedValue({
+                  data: [{ document_id: 'doc-1' }],
+                  error: null,
+                }),
+              }),
+            }),
+          }),
+        };
+      }
+
+      if (table === 'document_versions') {
+        return {
+          select: vi.fn().mockReturnValue({
+            eq: vi.fn().mockReturnValue({
+              order: vi.fn().mockResolvedValue({
+                data: [{ version_label: 'V1.0.0' }],
+                error: null,
+              }),
+            }),
+          }),
+          insert: insertVersion,
+        };
+      }
+
+      if (table === 'document_keys') {
+        return {
+          select: vi.fn().mockImplementation((columns: string) => {
+            if (columns === 'wrapped_document_key, key_version') {
+              return {
+                eq: vi.fn().mockReturnValue({
+                  eq: vi.fn().mockReturnValue({
+                    order: vi.fn().mockReturnValue({
+                      limit: vi.fn().mockResolvedValue({
+                        data: [{ wrapped_document_key: 'editor-current-key', key_version: 3 }],
+                        error: null,
+                      }),
+                    }),
+                  }),
+                }),
+              };
+            }
+            if (columns === 'user_id') {
+              return {
+                eq: vi.fn().mockResolvedValue({
+                  data: [{ user_id: 'owner-1' }, { user_id: 'member-1' }, { user_id: 'member-2' }],
+                  error: null,
+                }),
+              };
+            }
+            return { eq: vi.fn() };
+          }),
+          insert: insertKeys,
+        };
+      }
+
+      return {};
+    });
+
+    const blob = new Blob(['shared-doc'], { type: 'application/vnd.openxmlformats-officedocument.wordprocessingml.document' });
+
+    const result = await saveSharedDocumentVersion({
+      documentId: 'doc-1',
+      editorUserId: 'member-1',
+      editorEmail: 'member-1@example.com',
+      teamId: 'team-1',
+      blob,
+      fileName: 'shared.docx',
+      version: 'V1.1.0',
+      remark: 'member update',
+      selectedKeys: ['k2'],
+    });
+
+    expect(result.documentId).toBe('doc-1');
+    expect(insertVersion).toHaveBeenCalledTimes(1);
+    expect(update).toHaveBeenCalledTimes(1);
+    expect(vi.mocked(cryptoKeyService.distributeDocumentKey)).toHaveBeenCalledWith('doc-1', expect.anything(), 'owner-1', 4);
+    expect(vi.mocked(cryptoKeyService.distributeDocumentKey)).toHaveBeenCalledWith('doc-1', expect.anything(), 'member-2', 4);
   });
 });

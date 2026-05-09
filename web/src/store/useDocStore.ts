@@ -10,8 +10,10 @@ interface DocState {
   currentDocumentId: string | null;
   currentDocumentVersion: string | null;
   initialCheckedKeys: string[] | null;
-  
-  // Actions
+  documentMode: 'personal' | 'shared' | null;
+  documentAccessRole: 'owner' | 'member' | null;
+  currentTeamScopedShare: boolean;
+
   setFile: (file: File | null) => void;
   setUploading: (status: boolean) => void;
   setParsing: (status: boolean) => void;
@@ -20,6 +22,9 @@ interface DocState {
   setCurrentDocumentId: (id: string | null) => void;
   setCurrentDocumentVersion: (version: string | null) => void;
   setInitialCheckedKeys: (keys: string[] | null) => void;
+  setDocumentMode: (mode: 'personal' | 'shared' | null) => void;
+  setDocumentAccessRole: (role: 'owner' | 'member' | null) => void;
+  setCurrentTeamScopedShare: (shared: boolean) => void;
   reset: () => void;
 }
 
@@ -30,19 +35,23 @@ export const useDocStore = create<DocState>((set) => ({
   headings: [],
   checkedKeys: [],
   currentDocumentId: null,
-   currentDocumentVersion: null,
+  currentDocumentVersion: null,
   initialCheckedKeys: null,
+  documentMode: null,
+  documentAccessRole: null,
+  currentTeamScopedShare: false,
 
-  setFile: (file) =>
-    set({ currentFile: file, currentDocumentId: null, currentDocumentVersion: null }),
+  setFile: (file) => set({ currentFile: file }),
   setUploading: (status) => set({ isUploading: status }),
   setParsing: (status) => set({ isParsing: status }),
   setHeadings: (headings) => set({ headings }),
   setCheckedKeys: (keys) => set({ checkedKeys: keys }),
   setCurrentDocumentId: (id) => set({ currentDocumentId: id }),
-   setCurrentDocumentVersion: (version) =>
-    set({ currentDocumentVersion: version }),
+  setCurrentDocumentVersion: (version) => set({ currentDocumentVersion: version }),
   setInitialCheckedKeys: (keys) => set({ initialCheckedKeys: keys }),
+  setDocumentMode: (mode) => set({ documentMode: mode }),
+  setDocumentAccessRole: (role) => set({ documentAccessRole: role }),
+  setCurrentTeamScopedShare: (shared) => set({ currentTeamScopedShare: shared }),
   reset: () =>
     set({
       currentFile: null,
@@ -53,5 +62,8 @@ export const useDocStore = create<DocState>((set) => ({
       currentDocumentId: null,
       currentDocumentVersion: null,
       initialCheckedKeys: null,
+      documentMode: null,
+      documentAccessRole: null,
+      currentTeamScopedShare: false,
     }),
 }));

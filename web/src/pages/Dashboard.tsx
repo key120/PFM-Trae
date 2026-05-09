@@ -8,11 +8,17 @@ import { useAuthStore } from '../store/useAuthStore';
 import { parseDocumentHeadings, HeadingNode, getAllKeys, flattenHeadings } from '../utils/docParser';
 import { exportDocument } from '../utils/documentExporter';
 import SaveDocumentModal from '../components/SaveDocumentModal';
-import { savePersonalDocument } from '../services/documentService';
+import {
+  assertSharedVersionLabelAvailable,
+  savePersonalDocument,
+  saveSharedDocumentVersion,
+} from '../services/documentService';
 import { isWebCryptoAvailable } from '../services/cryptoKeyService';
+import { useTeamStore } from '../store/useTeamStore';
 
 const Dashboard: React.FC = () => {
   const { user } = useAuthStore();
+  const { currentTeamId } = useTeamStore();
   const {
     currentFile,
     setParsing,
@@ -26,6 +32,8 @@ const Dashboard: React.FC = () => {
     setCurrentDocumentVersion,
     initialCheckedKeys,
     setInitialCheckedKeys,
+    documentMode,
+    currentTeamScopedShare,
   } = useDocStore();
   const [exporting, setExporting] = React.useState(false);
   const [saving, setSaving] = React.useState(false);
@@ -64,7 +72,11 @@ const Dashboard: React.FC = () => {
     };
 
     parse();
-  }, [currentFile, setParsing, setHeadings, setCheckedKeys]);
+    // initialCheckedKeys 不加入依赖：它在 setFile 之前已写入 store，
+    // effect 读到的总是最新值；若加入依赖，setInitialCheckedKeys(null)
+    // 会再次触发 effect，导致 checkedKeys 被 allKeys 覆盖。
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [currentFile]);
 
   const handleTocSelect = (node: HeadingNode) => {
     const event = new CustomEvent('scrollToHeading', { detail: { key: node.key, title: node.title } });
@@ -114,6 +126,27 @@ const Dashboard: React.FC = () => {
       const selectedKeys = checkedKeys as string[];
       const blob: Blob = currentFile;
 
+      if (documentMode === 'shared' && currentDocumentId && currentTeamScopedShare && currentTeamId) {
+        const result = await saveSharedDocumentVersion({
+          documentId: currentDocumentId,
+          editorUserId: user.id,
+          editorEmail: user.email ?? null,
+          teamId: currentTeamId,
+          blob,
+          fileName: currentFile.name,
+          version: values.version,
+          remark: values.remark,
+          selectedKeys,
+        });
+
+        setCurrentDocumentId(result.documentId);
+        setCurrentDocumentVersion(values.version);
+        setSaveModalOpen(false);
+        window.dispatchEvent(new Event('sharedDocumentsChanged'));
+        message.success('保存成功');
+        return;
+      }
+
       const result = await savePersonalDocument({
         userId: user.id,
         authorEmail: user.email ?? null,
@@ -132,14 +165,29 @@ const Dashboard: React.FC = () => {
       message.success('保存成功');
     } catch (error) {
       console.error('Save failed:', error);
-      message.error('保存失败，请重试');
+      const errorMessage = error instanceof Error && error.message ? error.message : '保存失败，请重试';
+      message.error(errorMessage);
     } finally {
       setSaving(false);
     }
   };
 
+  const validateSharedVersion = React.useCallback(
+    async (version: string) => {
+      const trimmedVersion = version.trim();
+      if (!trimmedVersion || documentMode !== 'shared' || !currentDocumentId) {
+        return;
+      }
+      if (trimmedVersion === (currentDocumentVersion ?? '').trim()) {
+        return;
+      }
+      await assertSharedVersionLabelAvailable(currentDocumentId, trimmedVersion);
+    },
+    [documentMode, currentDocumentId, currentDocumentVersion],
+  );
+
   return (
-    <div style={{ 
+    <div style={{
       display: 'flex', 
       height: '100%', 
       gap: '10px',
@@ -201,9 +249,14 @@ const Dashboard: React.FC = () => {
                 <span style={{ color: '#666666', marginLeft: '4px' }}>
                   ({currentFile.name})
                 </span>
-                {currentDocumentId && (
+                {currentDocumentId && documentMode === 'personal' && (
                   <span style={{ color: '#1677ff', marginLeft: '4px' }}>
                     （个人）
+                  </span>
+                )}
+                {currentDocumentId && documentMode === 'shared' && (
+                  <span style={{ color: '#1677ff', marginLeft: '4px' }}>
+                    （共享）
                   </span>
                 )}
               </>
@@ -265,6 +318,7 @@ const Dashboard: React.FC = () => {
         onOk={handleSaveConfirm}
         onCancel={handleCloseSaveModal}
         defaultVersion={currentDocumentVersion}
+        validateVersion={documentMode === 'shared' ? validateSharedVersion : undefined}
       />
     </div>
   );

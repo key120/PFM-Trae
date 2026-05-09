@@ -454,9 +454,9 @@ const fillGaps = (container: HTMLElement) => {
     const cur = pages[i];
     const next = pages[i + 1];
     if (!cur || !next) continue;
-    let limit = getLimit(cur);
-    let children = getContentChildren(cur);
-    let used = totalHeight(children);
+    const limit = getLimit(cur);
+    const children = getContentChildren(cur);
+    const used = totalHeight(children);
     let remain = limit - used;
     if (remain < 20) continue;
     const nextChildren = getContentChildren(next).filter(c => getComputedStyle(c).display !== 'none');

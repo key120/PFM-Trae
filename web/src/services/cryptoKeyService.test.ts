@@ -219,7 +219,7 @@ describe('distributeDocumentKey', () => {
     vi.clearAllMocks();
   });
 
-  it('重复共享同一版本时使用 ignoreDuplicates 避免走 update RLS 路径', async () => {
+  it('重复共享同一版本时会覆盖已有 document_keys 行，避免保留旧坏 key', async () => {
     const { supabase } = await import('../lib/supabase');
     const originalIndexedDB = globalThis.indexedDB;
     setIndexedDB({});
@@ -262,7 +262,7 @@ describe('distributeDocumentKey', () => {
         wrapped_document_key: expect.any(String),
         key_version: 1,
       },
-      { onConflict: 'document_id,user_id,key_version', ignoreDuplicates: true },
+      { onConflict: 'document_id,user_id,key_version' },
     );
 
     importKeySpy.mockRestore();
