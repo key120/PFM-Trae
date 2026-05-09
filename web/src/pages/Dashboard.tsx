@@ -18,7 +18,7 @@ import { useTeamStore } from '../store/useTeamStore';
 
 const Dashboard: React.FC = () => {
   const { user } = useAuthStore();
-  const { currentTeamId } = useTeamStore();
+  const { currentTeamId, currentUserRole } = useTeamStore();
   const {
     currentFile,
     setParsing,
@@ -39,6 +39,13 @@ const Dashboard: React.FC = () => {
   const [saving, setSaving] = React.useState(false);
   const webCryptoAvailable = isWebCryptoAvailable();
   const [saveModalOpen, setSaveModalOpen] = React.useState(false);
+  const saveDisabledByRole = documentMode === 'shared' && currentUserRole === 'reader';
+  const saveDisabled = !webCryptoAvailable || saveDisabledByRole;
+  const saveTooltip = !webCryptoAvailable
+    ? '当前浏览器不支持加密功能，无法保存文档'
+    : saveDisabledByRole
+      ? '当前团队角色为只读，无法保存共享文档'
+      : undefined;
 
   // 当 currentFile 改变时，解析目录
   useEffect(() => {
@@ -277,13 +284,11 @@ const Dashboard: React.FC = () => {
         extra={
           currentFile ? (
             <Space size={8}>
-              <Tooltip
-                title={!webCryptoAvailable ? '当前浏览器不支持加密功能，无法保存文档' : undefined}
-              >
+              <Tooltip title={saveTooltip}>
                 <Button
                   type="default"
                   loading={saving}
-                  disabled={!webCryptoAvailable}
+                  disabled={saveDisabled}
                   onClick={handleOpenSaveModal}
                 >
                   保存

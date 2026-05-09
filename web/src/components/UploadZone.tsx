@@ -10,7 +10,7 @@ interface UploadZoneProps {
 }
 
 const UploadZone: React.FC<UploadZoneProps> = ({ variant = 'dragger' }) => {
-  const { setFile, setUploading } = useDocStore();
+  const { startNewUpload, setUploading } = useDocStore();
   // 使用 ref 来引用 Upload 组件，虽然对于 Button 变体可能不需要直接操作 ref，
   // 但保持一致性是好的。对于 Button 变体，Upload 组件会自动处理点击。
 
@@ -34,7 +34,7 @@ const UploadZone: React.FC<UploadZoneProps> = ({ variant = 'dragger' }) => {
     setUploading(true);
     // Simulate upload delay for better UX
     setTimeout(() => {
-      setFile(file);
+      startNewUpload(file);
       setUploading(false);
       message.success(`${file.name} 上传成功`);
     }, 500);

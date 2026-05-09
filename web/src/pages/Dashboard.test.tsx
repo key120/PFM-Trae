@@ -33,8 +33,13 @@ vi.mock('../store/useAuthStore', () => ({
   useAuthStore: () => ({ user: { id: 'user-1', email: 'tester@example.com' } }),
 }));
 
+const teamStoreState = {
+  currentTeamId: 'team-1',
+  currentUserRole: 'reader' as 'reader' | 'editor' | 'admin' | null,
+};
+
 vi.mock('../store/useTeamStore', () => ({
-  useTeamStore: () => ({ currentTeamId: 'team-1' }),
+  useTeamStore: () => teamStoreState,
   __esModule: true,
 }));
 
@@ -79,6 +84,8 @@ describe('Dashboard', () => {
     docStoreState.documentMode = 'shared';
     docStoreState.documentAccessRole = 'member';
     docStoreState.currentTeamScopedShare = true;
+    teamStoreState.currentTeamId = 'team-1';
+    teamStoreState.currentUserRole = 'reader';
     saveModalProps.onOk = undefined;
     saveModalProps.validateVersion = undefined;
     vi.mocked(documentService.saveSharedDocumentVersion).mockResolvedValue({ documentId: 'doc-1' } as never);
@@ -91,8 +98,23 @@ describe('Dashboard', () => {
     expect(screen.getByText('（共享）')).toBeInTheDocument();
   });
 
+  it('disables save button for reader in shared mode', () => {
+    teamStoreState.currentUserRole = 'reader';
+    render(<Dashboard />);
+
+    expect(screen.getByRole('button', { name: /保\s*存/ })).toBeDisabled();
+  });
+
+  it('enables save button for editor in shared mode', () => {
+    teamStoreState.currentUserRole = 'editor';
+    render(<Dashboard />);
+
+    expect(screen.getByRole('button', { name: /保\s*存/ })).toBeEnabled();
+  });
+
   it('dispatches saveSharedDocumentVersion when the editor is in shared mode', async () => {
     const user = userEvent.setup();
+    teamStoreState.currentUserRole = 'editor';
     render(<Dashboard />);
 
     await user.click(screen.getByRole('button', { name: /保\s*存/ }));
@@ -116,6 +138,7 @@ describe('Dashboard', () => {
 
   it('passes shared version validator to SaveDocumentModal in shared mode', async () => {
     const user = userEvent.setup();
+    teamStoreState.currentUserRole = 'editor';
     render(<Dashboard />);
 
     await user.click(screen.getByRole('button', { name: /保\s*存/ }));
@@ -186,6 +209,7 @@ describe('Dashboard', () => {
 
   it('shows personal mode badge and dispatches savePersonalDocument in personal mode', async () => {
     const user = userEvent.setup();
+    teamStoreState.currentUserRole = 'reader';
     docStoreState.documentMode = 'personal';
     docStoreState.currentTeamScopedShare = false;
 

@@ -10,6 +10,7 @@ import {
   createTeam,
   fetchInvitationNotifications,
   fetchUserTeams,
+  getCurrentUserTeamRole,
   rejectTeamInvitation,
 } from '../services/teamService';
 import type { TeamInvitationNotification } from '../services/teamService';
@@ -28,7 +29,7 @@ const getErrorMessage = (error: unknown, fallback: string) => {
 
 const MainLayout: React.FC = () => {
   const { user, signOut } = useAuthStore();
-  const { teams, currentTeamId, setCurrentTeamId, setTeams, addTeam } = useTeamStore();
+  const { teams, currentTeamId, setCurrentTeamId, setTeams, addTeam, setCurrentUserRole } = useTeamStore();
   const navigate = useNavigate();
   const [docDrawerOpen, setDocDrawerOpen] = useState(false);
   const [docTabKey, setDocTabKey] = useState('personal');
@@ -131,6 +132,29 @@ const MainLayout: React.FC = () => {
 
     window.localStorage.removeItem(currentTeamStorageKey);
   }, [currentTeamId, currentTeamStorageKey]);
+
+  useEffect(() => {
+    if (!user?.id || !currentTeamId) {
+      setCurrentUserRole(null);
+      return;
+    }
+
+    let active = true;
+
+    const loadCurrentUserRole = async () => {
+      const role = await getCurrentUserTeamRole(currentTeamId, user.id);
+      if (!active) {
+        return;
+      }
+      setCurrentUserRole(role);
+    };
+
+    void loadCurrentUserRole();
+
+    return () => {
+      active = false;
+    };
+  }, [currentTeamId, setCurrentUserRole, user?.id]);
 
   const handleLogout = async () => {
     await signOut();

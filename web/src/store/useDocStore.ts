@@ -15,6 +15,7 @@ interface DocState {
   currentTeamScopedShare: boolean;
 
   setFile: (file: File | null) => void;
+  startNewUpload: (file: File) => void;
   setUploading: (status: boolean) => void;
   setParsing: (status: boolean) => void;
   setHeadings: (headings: HeadingNode[]) => void;
@@ -42,6 +43,18 @@ export const useDocStore = create<DocState>((set) => ({
   currentTeamScopedShare: false,
 
   setFile: (file) => set({ currentFile: file }),
+  startNewUpload: (file) =>
+    set({
+      currentFile: file,
+      headings: [],
+      checkedKeys: [],
+      currentDocumentId: null,
+      currentDocumentVersion: null,
+      initialCheckedKeys: null,
+      documentMode: 'personal',
+      documentAccessRole: 'owner',
+      currentTeamScopedShare: false,
+    }),
   setUploading: (status) => set({ isUploading: status }),
   setParsing: (status) => set({ isParsing: status }),
   setHeadings: (headings) => set({ headings }),

@@ -2,6 +2,7 @@ import React, { useMemo } from 'react';
 import { Tree, Empty, Spin, Tooltip } from 'antd';
 import { DownOutlined } from '@ant-design/icons';
 import { useDocStore } from '../store/useDocStore';
+import { useTeamStore } from '../store/useTeamStore';
 import type { HeadingNode } from '../utils/docParser';
 import { calculateNumbering } from '../utils/numbering';
 
@@ -10,7 +11,9 @@ interface TableOfContentsProps {
 }
 
 const TableOfContents: React.FC<TableOfContentsProps> = ({ onSelect }) => {
-  const { headings, isParsing, checkedKeys, setCheckedKeys } = useDocStore();
+  const { headings, isParsing, checkedKeys, setCheckedKeys, documentMode } = useDocStore();
+  const { currentUserRole } = useTeamStore();
+  const checkDisabled = documentMode === 'shared' && currentUserRole === 'reader';
 
   // 计算动态序号 Map
   const numberingMap = useMemo(() => {
@@ -41,6 +44,10 @@ const TableOfContents: React.FC<TableOfContentsProps> = ({ onSelect }) => {
   };
 
   const handleCheck = (checked: React.Key[] | { checked: React.Key[]; halfChecked: React.Key[] }) => {
+    if (checkDisabled) {
+      return;
+    }
+
     const nextKeys = Array.isArray(checked) ? checked : checked.checked;
     (window as any).__lastCheckedKeys = nextKeys;
     setCheckedKeys(nextKeys as string[]);
@@ -81,6 +88,7 @@ const TableOfContents: React.FC<TableOfContentsProps> = ({ onSelect }) => {
       <Tree
         blockNode
         checkable
+        checkStrictly={false}
         showLine
         switcherIcon={<DownOutlined />}
         defaultExpandAll
@@ -88,6 +96,7 @@ const TableOfContents: React.FC<TableOfContentsProps> = ({ onSelect }) => {
         onSelect={handleSelect}
         onCheck={handleCheck}
         checkedKeys={checkedKeys}
+        disabled={checkDisabled}
         titleRender={titleRender}
         style={{ background: 'transparent' }}
       />

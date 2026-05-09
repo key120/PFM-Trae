@@ -10,16 +10,20 @@ const mockFetchUserTeams = vi.fn();
 const mockFetchInvitationNotifications = vi.fn();
 const mockAcceptTeamInvitation = vi.fn();
 const mockRejectTeamInvitation = vi.fn();
+const mockGetCurrentUserTeamRole = vi.fn();
 const mockTeamInfoModal = vi.fn();
 const mockStorageGetItem = vi.fn();
 const mockStorageSetItem = vi.fn();
 const mockAddTeam = vi.fn();
+const mockSetCurrentUserRole = vi.fn();
 const mockTeamState = {
   teams: [] as Array<{ id: string; name: string }>,
   currentTeamId: null as string | null,
+  currentUserRole: null as 'reader' | 'editor' | 'admin' | null,
   setCurrentTeamId: vi.fn(),
   setTeams: vi.fn(),
   addTeam: mockAddTeam,
+  setCurrentUserRole: mockSetCurrentUserRole,
 };
 
 vi.mock('../store/useAuthStore', () => ({
@@ -39,12 +43,27 @@ vi.mock('../services/teamService', () => ({
   fetchInvitationNotifications: (...args: unknown[]) => mockFetchInvitationNotifications(...args),
   acceptTeamInvitation: (...args: unknown[]) => mockAcceptTeamInvitation(...args),
   rejectTeamInvitation: (...args: unknown[]) => mockRejectTeamInvitation(...args),
+  getCurrentUserTeamRole: (...args: unknown[]) => mockGetCurrentUserTeamRole(...args),
 }));
 
 vi.mock('../components/TeamInfoModal', () => ({
   default: (props: { open: boolean; teamId: string | null; onClose: () => void }) => {
     mockTeamInfoModal(props);
     return props.open ? <div>团队信息弹窗</div> : null;
+  },
+}));
+
+vi.mock('../components/PersonalDocumentList', () => ({
+  default: (props: { open: boolean }) => (props.open ? <div>个人文档列表</div> : null),
+}));
+
+vi.mock('../components/SharedDocumentList', () => ({
+  default: (props: { open: boolean }) => {
+    if (!props.open) {
+      return null;
+    }
+
+    return mockTeamState.currentTeamId ? <div>共享文档列表</div> : <div>请先选择团队后查看共享文档</div>;
   },
 }));
 
@@ -71,13 +90,18 @@ const resetMainLayoutMocks = () => {
   mockStorageGetItem.mockReset();
   mockStorageSetItem.mockReset();
   mockAddTeam.mockReset();
+  mockSetCurrentUserRole.mockReset();
+  mockGetCurrentUserTeamRole.mockReset();
   mockTeamState.teams = [];
   mockTeamState.currentTeamId = null;
+  mockTeamState.currentUserRole = null;
   mockTeamState.setCurrentTeamId = vi.fn();
   mockTeamState.setTeams = vi.fn();
   mockTeamState.addTeam = mockAddTeam;
+  mockTeamState.setCurrentUserRole = mockSetCurrentUserRole;
   mockFetchUserTeams.mockResolvedValue([]);
   mockFetchInvitationNotifications.mockResolvedValue([]);
+  mockGetCurrentUserTeamRole.mockResolvedValue(null);
 };
 
 describe('MainLayout 文档列表 Drawer', () => {
