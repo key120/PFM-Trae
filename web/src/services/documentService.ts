@@ -1,8 +1,6 @@
 import { supabase } from '../lib/supabase';
-import {
-  encryptDocumentChunked,
-  decryptDocumentChunked,
-} from './encryptionService';
+import { decryptDocumentChunked } from './encryptionService';
+import { encryptDocumentChunkedViaWorker } from './documentEncryptionWorker';
 import {
   generateDocumentKey,
   wrapDocumentKey,
@@ -16,6 +14,12 @@ import {
   restoreUserPrivateKey,
 } from './cryptoKeyService';
 import { generateDocumentId, generateVersionId } from '../utils/idGenerator';
+import { distributeDocumentKeyConcurrently } from './sharedDocumentKeyDistribution';
+import { createSaveTelemetry, type SaveTelemetryStep } from './documentSaveTelemetry';
+import {
+  type SaveProgressCallback,
+  computeSaveProgress,
+} from './documentSaveProgress';
 
 export interface PersonalDocument {
   id: string;
@@ -91,6 +95,7 @@ interface SavePersonalDocumentInput {
   version: string;
   remark: string;
   selectedKeys: string[];
+  onProgress?: SaveProgressCallback;
 }
 
 interface SavePersonalDocumentResult {
@@ -110,6 +115,33 @@ interface KeyNotReadyError extends Error {
 
 function createKeyNotReadyError(message: string): KeyNotReadyError {
   return Object.assign(new Error(message), { code: 'KEY_NOT_READY' as const });
+}
+
+async function runSaveStep<T>(
+  telemetry: ReturnType<typeof createSaveTelemetry>,
+  step: SaveTelemetryStep,
+  operation: () => Promise<T>,
+  extra?: { memberCount?: number; actualDistributed?: number; concurrency?: number },
+): Promise<T> {
+  telemetry.markStepStart(step, extra);
+  try {
+    const result = await operation();
+    telemetry.markStepEnd(step, extra);
+    return result;
+  } catch (error) {
+    telemetry.markFailure(step, error, extra);
+    throw error;
+  }
+}
+
+function createSafeEmitter(onProgress?: SaveProgressCallback) {
+  return (info: ReturnType<typeof computeSaveProgress>) => {
+    try {
+      onProgress?.(info);
+    } catch {
+      // swallow callback errors — never break the save pipeline
+    }
+  };
 }
 
 export async function fetchPersonalDocuments(userId: string): Promise<PersonalDocument[]> {
@@ -177,167 +209,209 @@ export async function savePersonalDocument(
   // Step 1：生成 documentId（新建）或沿用已有 ID
   const documentId = input.documentId || generateDocumentId();
   const versionId = generateVersionId();
-
-  // Step 2：获取当前用户的 RSA 公钥（用于封装文档密钥）
-  const keyPair = await getUserKeyPair(input.userId);
-  if (!keyPair) {
-    throw new Error('未找到用户密钥，请重新登录后重试');
-  }
-
-  // 提前计算本次 key_version：供 document_keys 写入与私钥备份版本保持一致。
-  const { data: existingKeyData } = await supabase
-    .from('document_keys')
-    .select('key_version')
-    .eq('document_id', documentId)
-    .eq('user_id', input.userId)
-    .order('key_version', { ascending: false })
-    .limit(1)
-    .maybeSingle();
-
-  const nextKeyVersion = existingKeyData ? (existingKeyData.key_version as number) + 1 : 1;
-
-  // 每次保存时尝试备份私钥，保证跨浏览器可恢复。
-  await backupUserPrivateKey(keyPair.privateKey, nextKeyVersion);
-
-  // Step 3：生成本次版本的 DocumentKey（AES-GCM-256）
-  const documentKey = await generateDocumentKey();
-
-  // Step 4：用公钥封装 DocumentKey → wrappedKey（用于写入 document_keys）
-  const wrappedKey = await wrapDocumentKey(documentKey, keyPair.publicKey);
-
-  // Step 5：加密原始 DOCX Blob（分块加密，携带 title/remark/selectedKeys 等元数据）
-  const { blob: encryptedBlob, contentHash } = await encryptDocumentChunked({
-    file: input.blob,
-    key: documentKey,
-    meta: {
-      title: input.fileName,
-      remark: input.remark,
-      selectedKeys: input.selectedKeys,
-      originalFileName: input.fileName,
-      mimeType: 'application/vnd.openxmlformats-officedocument.wordprocessingml.document',
-    },
+  const telemetry = createSaveTelemetry({
+    documentId,
+    versionId,
+    mode: 'personal',
+    fileSize: input.blob.size,
   });
+  telemetry.markStepStart('save_started');
+  telemetry.markStepEnd('save_started');
 
-  // Step 6：获取预签名 PUT URL 并上传到 R2
-  const r2Key = await uploadToR2(documentId, versionId, contentHash, encryptedBlob);
+  const emit = createSafeEmitter(input.onProgress);
+  emit(computeSaveProgress('preparing'));
 
-  const size = encryptedBlob.size;
-  const now = new Date().toISOString();
-  const versionEntry: VersionInfo = {
-    version: input.version,
-    remark: input.remark,
-    author: input.authorEmail,
-    createdAt: now,
-    sizeBytes: size,
-  };
+  try {
+    // Step 2：获取当前用户的 RSA 公钥（用于封装文档密钥）
+    const keyPair = await getUserKeyPair(input.userId);
+    if (!keyPair) {
+      throw new Error('未找到用户密钥，请重新登录后重试');
+    }
 
-  // Step 7：写入或更新 documents 表（元数据摘要）
-  if (!input.documentId) {
-    const metadata: DocumentMetadata = {
-      latestVersion: input.version,
-      latestRemark: input.remark,
-      versions: [versionEntry],
-      selectedKeys: input.selectedKeys,
-      encryption: { enabled: true, version: 2 },
+    // 提前计算本次 key_version：供 document_keys 写入与私钥备份版本保持一致。
+    const { data: existingKeyData } = await supabase
+      .from('document_keys')
+      .select('key_version')
+      .eq('document_id', documentId)
+      .eq('user_id', input.userId)
+      .order('key_version', { ascending: false })
+      .limit(1)
+      .maybeSingle();
+
+    const nextKeyVersion = existingKeyData ? (existingKeyData.key_version as number) + 1 : 1;
+
+    // 每次保存时尝试备份私钥，保证跨浏览器可恢复。
+    await backupUserPrivateKey(keyPair.privateKey, nextKeyVersion);
+
+    // Step 3：生成本次版本的 DocumentKey（AES-GCM-256）
+    const documentKey = await generateDocumentKey();
+
+    // Step 4：用公钥封装 DocumentKey → wrappedKey（用于写入 document_keys）
+    const wrappedKey = await wrapDocumentKey(documentKey, keyPair.publicKey);
+
+    // Step 5：加密原始 DOCX Blob（分块加密，携带 title/remark/selectedKeys 等元数据）
+    // 优先尝试 Worker 加密，Worker 不可用或失败时回退到主线程加密
+    const encryptInput = {
+      file: input.blob,
+      key: documentKey,
+      meta: {
+        title: input.fileName,
+        remark: input.remark,
+        selectedKeys: input.selectedKeys,
+        originalFileName: input.fileName,
+        mimeType: 'application/vnd.openxmlformats-officedocument.wordprocessingml.document',
+      },
     };
-    const { error } = await supabase
-      .from('documents')
-      .insert({
-        id: documentId,
-        owner_id: input.userId,
-        encrypted_title: input.fileName,
-        size,
-        type: 'docx',
-        path: r2Key,
-        metadata,
-        updated_at: now,
+    const { blob: encryptedBlob, contentHash } = await runSaveStep(
+      telemetry,
+      'encryption',
+      () => encryptDocumentChunkedViaWorker(encryptInput, {
+        onProgress: (chunkIndex, totalChunks) => {
+          emit(computeSaveProgress('encrypting', { chunkIndex, totalChunks }));
+        },
+      }),
+    );
+
+    // Step 6：获取预签名 PUT URL 并上传到 R2
+    emit(computeSaveProgress('uploading'));
+    const r2Key = await runSaveStep(
+      telemetry,
+      'upload',
+      () => uploadToR2(documentId, versionId, contentHash, encryptedBlob),
+    );
+
+    const size = encryptedBlob.size;
+    const now = new Date().toISOString();
+    const versionEntry: VersionInfo = {
+      version: input.version,
+      remark: input.remark,
+      author: input.authorEmail,
+      createdAt: now,
+      sizeBytes: size,
+    };
+
+    // Step 7：写入或更新 documents 表（元数据摘要）
+    emit(computeSaveProgress('persisting'));
+    await runSaveStep(telemetry, 'documents_write', async () => {
+      if (!input.documentId) {
+        const metadata: DocumentMetadata = {
+          latestVersion: input.version,
+          latestRemark: input.remark,
+          versions: [versionEntry],
+          selectedKeys: input.selectedKeys,
+          encryption: { enabled: true, version: 2 },
+        };
+        const { error } = await supabase
+          .from('documents')
+          .insert({
+            id: documentId,
+            owner_id: input.userId,
+            encrypted_title: input.fileName,
+            size,
+            type: 'docx',
+            path: r2Key,
+            metadata,
+            updated_at: now,
+          });
+
+        if (error) {
+          throw error;
+        }
+        return;
+      }
+
+      const { data: existing, error: loadError } = await supabase
+        .from('documents')
+        .select('metadata')
+        .eq('id', documentId)
+        .eq('owner_id', input.userId)
+        .single();
+
+      if (loadError || !existing) {
+        throw loadError || new Error('Failed to load existing document metadata');
+      }
+
+      const existingMeta = (existing.metadata as DocumentMetadata | null) ?? null;
+      const existingVersions =
+        existingMeta && Array.isArray(existingMeta.versions)
+          ? (existingMeta.versions as VersionInfo[])
+          : [];
+
+      const metadata: DocumentMetadata = {
+        latestVersion: input.version,
+        latestRemark: input.remark,
+        versions: [versionEntry, ...existingVersions],
+        selectedKeys: input.selectedKeys,
+        encryption: { enabled: true, version: 2 },
+      };
+
+      const { error } = await supabase
+        .from('documents')
+        .update({
+          encrypted_title: input.fileName,
+          size,
+          type: 'docx',
+          path: r2Key,
+          metadata,
+          updated_at: now,
+        })
+        .eq('id', documentId)
+        .eq('owner_id', input.userId);
+
+      if (error) {
+        throw error;
+      }
+    });
+
+    // Step 8：写入 document_versions 表（真实版本下载源）
+    await runSaveStep(telemetry, 'document_versions_write', async () => {
+      const { error: versionError } = await supabase.from('document_versions').insert({
+        id: versionId,
+        document_id: documentId,
+        version_label: input.version,
+        note: input.remark || null,
+        author_id: input.userId,
+        r2_key: r2Key,
+        content_hash: contentHash,
+        encrypted_meta: {
+          title: input.fileName,
+          selectedKeys: input.selectedKeys,
+          keyVersion: nextKeyVersion,
+        },
+        key_version: nextKeyVersion,
+        size_bytes: size,
       });
 
-    if (error) {
-      throw error;
-    }
-  } else {
-    const { data: existing, error: loadError } = await supabase
-      .from('documents')
-      .select('metadata')
-      .eq('id', documentId)
-      .eq('owner_id', input.userId)
-      .single();
+      if (versionError) {
+        throw versionError;
+      }
+    });
 
-    if (loadError || !existing) {
-      throw loadError || new Error('Failed to load existing document metadata');
-    }
+    // Step 9：写入 document_keys 表（owner 的 wrapped key，确保自己也能解密）
+    await runSaveStep(telemetry, 'document_keys_write', async () => {
+      const { error: keyError } = await supabase.from('document_keys').insert({
+        document_id: documentId,
+        user_id: input.userId,
+        wrapped_document_key: wrappedKey,
+        key_version: nextKeyVersion,
+      });
 
-    const existingMeta = (existing.metadata as DocumentMetadata | null) ?? null;
-    const existingVersions =
-      existingMeta && Array.isArray(existingMeta.versions)
-        ? (existingMeta.versions as VersionInfo[])
-        : [];
+      if (keyError) {
+        // 23505 = unique_violation，并发双击场景下同 key_version 已存在，可安全忽略
+        if ((keyError as { code?: string }).code !== '23505') {
+          throw new Error(`document_keys 写入失败：${keyError.message}`);
+        }
+      }
+    });
 
-    const metadata: DocumentMetadata = {
-      latestVersion: input.version,
-      latestRemark: input.remark,
-      versions: [versionEntry, ...existingVersions],
-      selectedKeys: input.selectedKeys,
-      encryption: { enabled: true, version: 2 },
-    };
-
-    const { error } = await supabase
-      .from('documents')
-      .update({
-        encrypted_title: input.fileName,
-        size,
-        type: 'docx',
-        path: r2Key,
-        metadata,
-        updated_at: now,
-      })
-      .eq('id', documentId)
-      .eq('owner_id', input.userId);
-
-    if (error) {
-      throw error;
-    }
+    telemetry.finish();
+    emit(computeSaveProgress('done'));
+    return { documentId };
+  } catch (error) {
+    emit(computeSaveProgress('failed'));
+    telemetry.markFailure('save_finished', error);
+    throw error;
   }
-
-  // Step 8：写入 document_versions 表（真实版本下载源）
-  const { error: versionError } = await supabase.from('document_versions').insert({
-    id: versionId,
-    document_id: documentId,
-    version_label: input.version,
-    note: input.remark || null,
-    author_id: input.userId,
-    r2_key: r2Key,
-    content_hash: contentHash,
-    encrypted_meta: {
-      title: input.fileName,
-      selectedKeys: input.selectedKeys,
-      keyVersion: nextKeyVersion,
-    },
-    key_version: nextKeyVersion,
-    size_bytes: size,
-  });
-
-  if (versionError) {
-    throw versionError;
-  }
-
-  // Step 9：写入 document_keys 表（owner 的 wrapped key，确保自己也能解密）
-  const { error: keyError } = await supabase.from('document_keys').insert({
-    document_id: documentId,
-    user_id: input.userId,
-    wrapped_document_key: wrappedKey,
-    key_version: nextKeyVersion,
-  });
-
-  if (keyError) {
-    // 23505 = unique_violation，并发双击场景下同 key_version 已存在，可安全忽略
-    if ((keyError as { code?: string }).code !== '23505') {
-      throw new Error(`document_keys 写入失败：${keyError.message}`);
-    }
-  }
-
-  return { documentId };
 }
 
 // ─── R2 上传/下载辅助函数 ─────────────────────────────────────────────────────
@@ -965,6 +1039,7 @@ interface SaveSharedDocumentVersionInput {
   version: string;
   remark: string;
   selectedKeys: string[];
+  onProgress?: SaveProgressCallback;
 }
 
 interface SaveSharedDocumentVersionResult {
@@ -978,156 +1053,229 @@ export async function saveSharedDocumentVersion(
     throw new Error('当前浏览器不支持 Web Crypto API，无法保存共享文档');
   }
 
-  await assertSharedVersionLabelAvailable(input.documentId, input.version);
-
-  const { data: documentRow, error: documentError } = await supabase
-    .from('documents')
-    .select('id, owner_id, encrypted_title, metadata')
-    .eq('id', input.documentId)
-    .single();
-
-  if (documentError || !documentRow) {
-    throw documentError || new Error('共享文档不存在');
-  }
-
-  const { data: shareRows, error: shareError } = await supabase
-    .from('document_shares')
-    .select('document_id')
-    .eq('document_id', input.documentId)
-    .eq('team_id', input.teamId)
-    .limit(1);
-
-  if (shareError || !shareRows || shareRows.length === 0) {
-    throw new Error('共享权限已失效，请重新载入后重试');
-  }
-
-  const { data: currentKeyRows, error: keyError } = await supabase
-    .from('document_keys')
-    .select('wrapped_document_key, key_version')
-    .eq('document_id', input.documentId)
-    .eq('user_id', input.editorUserId)
-    .order('key_version', { ascending: false })
-    .limit(1);
-
-  if (keyError || !currentKeyRows || currentKeyRows.length === 0) {
-    throw new Error('共享权限已失效，请重新载入后重试');
-  }
-
-  let editorKeyPair = await getUserKeyPair(input.editorUserId);
-  if (!editorKeyPair) {
-    await restoreUserPrivateKey();
-    editorKeyPair = await getUserKeyPair(input.editorUserId);
-  }
-  if (!editorKeyPair) {
-    throw new Error('未找到用户密钥，请重新登录后重试');
-  }
-
-  const currentRow = currentKeyRows[0] as { wrapped_document_key: string; key_version: number };
-  const nextKeyVersion = currentRow.key_version + 1;
-
-  await backupUserPrivateKey(editorKeyPair.privateKey, nextKeyVersion);
-
-  const nextDocumentKey = await generateDocumentKey();
-  const editorWrappedKey = await wrapDocumentKey(nextDocumentKey, editorKeyPair.publicKey);
   const versionId = generateVersionId();
-  const { blob: encryptedBlob, contentHash } = await encryptDocumentChunked({
-    file: input.blob,
-    key: nextDocumentKey,
-    meta: {
-      title: input.fileName,
-      remark: input.remark,
-      selectedKeys: input.selectedKeys,
-      originalFileName: input.fileName,
-      mimeType: 'application/vnd.openxmlformats-officedocument.wordprocessingml.document',
-    },
+  const telemetry = createSaveTelemetry({
+    documentId: input.documentId,
+    versionId,
+    mode: 'shared',
+    fileSize: input.blob.size,
   });
+  telemetry.markStepStart('save_started');
+  telemetry.markStepEnd('save_started');
 
-  const r2Key = await uploadToR2(input.documentId, versionId, contentHash, encryptedBlob);
-  const size = encryptedBlob.size;
-  const now = new Date().toISOString();
-  const metadata = (documentRow.metadata as DocumentMetadata | null) ?? null;
-  const existingVersions = readVersionSummaries(metadata);
-  const versionEntry: VersionInfo = {
-    version: input.version,
-    remark: input.remark,
-    author: input.editorEmail,
-    createdAt: now,
-    sizeBytes: size,
-  };
+  const emit = createSafeEmitter(input.onProgress);
+  emit(computeSaveProgress('preparing'));
 
-  const { error: insertVersionError } = await supabase.from('document_versions').insert({
-    id: versionId,
-    document_id: input.documentId,
-    version_label: input.version,
-    note: input.remark || null,
-    author_id: input.editorUserId,
-    r2_key: r2Key,
-    content_hash: contentHash,
-    encrypted_meta: {
-      title: input.fileName,
-      selectedKeys: input.selectedKeys,
-      keyVersion: nextKeyVersion,
-    },
-    key_version: nextKeyVersion,
-    size_bytes: size,
-  });
+  try {
+    await assertSharedVersionLabelAvailable(input.documentId, input.version);
 
-  if (insertVersionError) {
-    throw insertVersionError;
-  }
+    const { data: documentRow, error: documentError } = await supabase
+      .from('documents')
+      .select('id, owner_id, encrypted_title, metadata')
+      .eq('id', input.documentId)
+      .single();
 
-  const { error: updateError } = await supabase
-    .from('documents')
-    .update({
-      encrypted_title: input.fileName,
-      size,
-      path: r2Key,
-      metadata: {
-        ...metadata,
-        latestVersion: input.version,
-        latestRemark: input.remark,
-        versions: [versionEntry, ...existingVersions],
-        selectedKeys: input.selectedKeys,
-        encryption: { enabled: true, version: 2 },
-      },
-      updated_at: now,
-    })
-    .eq('id', input.documentId);
-
-  if (updateError) {
-    throw updateError;
-  }
-
-  const { data: eligibleKeyRows, error: eligibleKeyError } = await supabase
-    .from('document_keys')
-    .select('user_id')
-    .eq('document_id', input.documentId);
-
-  if (eligibleKeyError) {
-    throw eligibleKeyError;
-  }
-
-  const targetUserIds = Array.from(new Set(
-    (eligibleKeyRows ?? [])
-      .map((row) => row.user_id as string | null)
-      .filter((value): value is string => Boolean(value)),
-  ));
-
-  await supabase.from('document_keys').insert({
-    document_id: input.documentId,
-    user_id: input.editorUserId,
-    wrapped_document_key: editorWrappedKey,
-    key_version: nextKeyVersion,
-  });
-
-  for (const targetUserId of targetUserIds) {
-    if (targetUserId === input.editorUserId) {
-      continue;
+    if (documentError || !documentRow) {
+      throw documentError || new Error('共享文档不存在');
     }
-    await distributeDocumentKey(input.documentId, nextDocumentKey, targetUserId, nextKeyVersion);
-  }
 
-  return { documentId: input.documentId };
+    const { data: shareRows, error: shareError } = await supabase
+      .from('document_shares')
+      .select('document_id')
+      .eq('document_id', input.documentId)
+      .eq('team_id', input.teamId)
+      .limit(1);
+
+    if (shareError || !shareRows || shareRows.length === 0) {
+      throw new Error('共享权限已失效，请重新载入后重试');
+    }
+
+    const { data: currentKeyRows, error: keyError } = await supabase
+      .from('document_keys')
+      .select('wrapped_document_key, key_version')
+      .eq('document_id', input.documentId)
+      .eq('user_id', input.editorUserId)
+      .order('key_version', { ascending: false })
+      .limit(1);
+
+    if (keyError || !currentKeyRows || currentKeyRows.length === 0) {
+      throw new Error('共享权限已失效，请重新载入后重试');
+    }
+
+    let editorKeyPair = await getUserKeyPair(input.editorUserId);
+    if (!editorKeyPair) {
+      await restoreUserPrivateKey();
+      editorKeyPair = await getUserKeyPair(input.editorUserId);
+    }
+    if (!editorKeyPair) {
+      throw new Error('未找到用户密钥，请重新登录后重试');
+    }
+
+    const currentRow = currentKeyRows[0] as { wrapped_document_key: string; key_version: number };
+    const nextKeyVersion = currentRow.key_version + 1;
+
+    await backupUserPrivateKey(editorKeyPair.privateKey, nextKeyVersion);
+
+    const nextDocumentKey = await generateDocumentKey();
+    const editorWrappedKey = await wrapDocumentKey(nextDocumentKey, editorKeyPair.publicKey);
+    const sharedEncryptInput = {
+      file: input.blob,
+      key: nextDocumentKey,
+      meta: {
+        title: input.fileName,
+        remark: input.remark,
+        selectedKeys: input.selectedKeys,
+        originalFileName: input.fileName,
+        mimeType: 'application/vnd.openxmlformats-officedocument.wordprocessingml.document',
+      },
+    };
+    const { blob: encryptedBlob, contentHash } = await runSaveStep(
+      telemetry,
+      'encryption',
+      () => encryptDocumentChunkedViaWorker(sharedEncryptInput, {
+        onProgress: (chunkIndex, totalChunks) => {
+          emit(computeSaveProgress('encrypting', { chunkIndex, totalChunks }));
+        },
+      }),
+    );
+
+    emit(computeSaveProgress('uploading'));
+    const r2Key = await runSaveStep(
+      telemetry,
+      'upload',
+      () => uploadToR2(input.documentId, versionId, contentHash, encryptedBlob),
+    );
+    const size = encryptedBlob.size;
+    const now = new Date().toISOString();
+    const metadata = (documentRow.metadata as DocumentMetadata | null) ?? null;
+    const existingVersions = readVersionSummaries(metadata);
+    const versionEntry: VersionInfo = {
+      version: input.version,
+      remark: input.remark,
+      author: input.editorEmail,
+      createdAt: now,
+      sizeBytes: size,
+    };
+
+    emit(computeSaveProgress('persisting'));
+    await runSaveStep(telemetry, 'document_versions_write', async () => {
+      const { error: insertVersionError } = await supabase.from('document_versions').insert({
+        id: versionId,
+        document_id: input.documentId,
+        version_label: input.version,
+        note: input.remark || null,
+        author_id: input.editorUserId,
+        r2_key: r2Key,
+        content_hash: contentHash,
+        encrypted_meta: {
+          title: input.fileName,
+          selectedKeys: input.selectedKeys,
+          keyVersion: nextKeyVersion,
+        },
+        key_version: nextKeyVersion,
+        size_bytes: size,
+      });
+
+      if (insertVersionError) {
+        throw insertVersionError;
+      }
+    });
+
+    await runSaveStep(telemetry, 'documents_write', async () => {
+      const { error: updateError } = await supabase
+        .from('documents')
+        .update({
+          encrypted_title: input.fileName,
+          size,
+          path: r2Key,
+          metadata: {
+            ...metadata,
+            latestVersion: input.version,
+            latestRemark: input.remark,
+            versions: [versionEntry, ...existingVersions],
+            selectedKeys: input.selectedKeys,
+            encryption: { enabled: true, version: 2 },
+          },
+          updated_at: now,
+        })
+        .eq('id', input.documentId);
+
+      if (updateError) {
+        throw updateError;
+      }
+    });
+
+    telemetry.markStepStart('shared_users_fetch');
+    let eligibleKeyRows: Array<{ user_id: string | null }> | null = null;
+    try {
+      const result = await supabase
+        .from('document_keys')
+        .select('user_id')
+        .eq('document_id', input.documentId);
+
+      if (result.error) {
+        throw result.error;
+      }
+
+      eligibleKeyRows = (result.data as Array<{ user_id: string | null }> | null) ?? null;
+    } catch (error) {
+      telemetry.markFailure('shared_users_fetch', error);
+      throw error;
+    }
+
+    const targetUserIds = Array.from(new Set(
+      (eligibleKeyRows ?? [])
+        .map((row) => row.user_id as string | null)
+        .filter((value): value is string => Boolean(value)),
+    ));
+    const eligibleMemberCount = targetUserIds.length;
+    const distributionTargetUserIds = targetUserIds.filter((userId) => userId !== input.editorUserId);
+    const distributionMemberCount = distributionTargetUserIds.length;
+    telemetry.markStepEnd('shared_users_fetch', { memberCount: eligibleMemberCount });
+
+    await runSaveStep(telemetry, 'document_keys_write', async () => {
+      await supabase.from('document_keys').insert({
+        document_id: input.documentId,
+        user_id: input.editorUserId,
+        wrapped_document_key: editorWrappedKey,
+        key_version: nextKeyVersion,
+      });
+    });
+
+    telemetry.markStepStart('key_distribution', { memberCount: distributionMemberCount });
+    try {
+      const { distributed, failed, actualDistributed, concurrencyUsed, durationMs } = await distributeDocumentKeyConcurrently(
+        {
+          documentId: input.documentId,
+          wrappedKey: nextDocumentKey,
+          targetUserIds: distributionTargetUserIds,
+          keyVersion: nextKeyVersion,
+        },
+        (docId, key, userId, version) => distributeDocumentKey(docId, key, userId, version),
+      );
+
+      if (failed.length > 0) {
+        throw new Error(`密钥分发失败：${failed.map(f => f.userId).join(', ')}`);
+      }
+
+      telemetry.markStepEnd('key_distribution', {
+        memberCount: distributionMemberCount,
+        actualDistributed,
+        concurrency: concurrencyUsed,
+      });
+    } catch (error) {
+      telemetry.markFailure('key_distribution', error, { memberCount: distributionMemberCount });
+      throw error;
+    }
+
+    telemetry.finish({ memberCount: distributionMemberCount });
+    emit(computeSaveProgress('done'));
+    return { documentId: input.documentId };
+  } catch (error) {
+    emit(computeSaveProgress('failed'));
+    telemetry.markFailure('save_finished', error);
+    throw error;
+  }
 }
 
 export async function loadSharedDocument(

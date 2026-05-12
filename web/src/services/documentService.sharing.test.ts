@@ -1,4 +1,4 @@
-import { describe, expect, it, vi, beforeEach } from 'vitest';
+import { describe, expect, it, vi, beforeEach, afterEach } from 'vitest';
 import {
   shareDocument,
   unshareDocument,
@@ -11,6 +11,7 @@ import {
 import { supabase } from '../lib/supabase';
 import * as cryptoKeyService from './cryptoKeyService';
 import * as encryptionService from './encryptionService';
+import * as documentEncryptionWorker from './documentEncryptionWorker';
 
 type MockFn = ReturnType<typeof vi.fn>;
 
@@ -38,6 +39,13 @@ vi.mock('./encryptionService', () => ({
     contentHash: 'shared-hash',
   })),
   decryptDocumentChunked: vi.fn(),
+}));
+
+vi.mock('./documentEncryptionWorker', () => ({
+  encryptDocumentChunkedViaWorker: vi.fn(async () => ({
+    blob: new Blob(['encrypted'], { type: 'application/octet-stream' }),
+    contentHash: 'shared-hash',
+  })),
 }));
 
 vi.mock('../utils/idGenerator', () => ({
@@ -70,6 +78,10 @@ const resetMocks = () => {
   vi.mocked(cryptoKeyService.distributeDocumentKey).mockImplementation(async () => undefined);
   vi.mocked(cryptoKeyService.revokeDocumentKeyAccess).mockImplementation(async () => undefined);
   vi.mocked(encryptionService.encryptDocumentChunked).mockImplementation(async () => ({
+    blob: new Blob(['encrypted'], { type: 'application/octet-stream' }),
+    contentHash: 'shared-hash',
+  }));
+  vi.mocked(documentEncryptionWorker.encryptDocumentChunkedViaWorker).mockImplementation(async () => ({
     blob: new Blob(['encrypted'], { type: 'application/octet-stream' }),
     contentHash: 'shared-hash',
   }));
@@ -328,7 +340,152 @@ describe('unshareDocument', () => {
 });
 
 describe('current-team document list queries', () => {
-  beforeEach(resetMocks);
+  it('Worker 适配层完全失败时，共享保存会正确传播异常（回退由适配层内部处理）', async () => {
+    // Arrange: Worker adapter 完全失败（Worker + 主线程回退都失败）
+    vi.mocked(documentEncryptionWorker.encryptDocumentChunkedViaWorker).mockRejectedValue(
+      new Error('Worker unavailable'),
+    );
+
+    const fromMock = supabase.from as unknown as MockFn;
+    const invokeMock = supabase.functions.invoke as unknown as MockFn;
+
+    invokeMock.mockResolvedValue({
+      data: {
+        url: 'https://r2.example.com/shared-put',
+        method: 'PUT',
+        headers: { 'Content-Type': 'application/octet-stream' },
+        expiresAt: new Date(Date.now() + 300000).toISOString(),
+        r2Key: 'pfm-trae/dev/documents/doc-1/new-ver-uuid/hash.bin',
+      },
+      error: null,
+    });
+
+    global.fetch = vi.fn().mockResolvedValue({ ok: true, status: 200 } as Response);
+    vi.mocked(cryptoKeyService.generateDocumentKey).mockResolvedValue({ type: 'secret' } as unknown as CryptoKey);
+    vi.mocked(cryptoKeyService.wrapDocumentKey).mockResolvedValue('editor-wrapped-key');
+    vi.mocked(cryptoKeyService.distributeDocumentKey).mockResolvedValue(undefined);
+
+    const documentSingle = vi.fn().mockResolvedValue({
+      data: {
+        id: 'doc-1',
+        owner_id: 'owner-1',
+        encrypted_title: '共享文档',
+        metadata: {
+          latestVersion: 'V1.0.0',
+          latestRemark: 'old',
+          versions: [{ version: 'V1.0.0', remark: 'old', author: 'owner@example.com', createdAt: '2026-05-01T00:00:00Z', sizeBytes: 100 }],
+          selectedKeys: ['k1'],
+          encryption: { enabled: true, version: 2 },
+        },
+      },
+      error: null,
+    });
+
+    const updateEq = vi.fn().mockResolvedValue({ error: null });
+    const update = vi.fn().mockReturnValue({ eq: updateEq });
+    const insertVersion = vi.fn().mockResolvedValue({ error: null });
+    const insertKeys = vi.fn().mockResolvedValue({ error: null });
+
+    fromMock.mockImplementation((table: string) => {
+      if (table === 'documents') {
+        return {
+          select: vi.fn().mockReturnValue({
+            eq: vi.fn().mockReturnValue({ single: documentSingle }),
+          }),
+          update,
+        };
+      }
+
+      if (table === 'document_shares') {
+        return {
+          select: vi.fn().mockReturnValue({
+            eq: vi.fn().mockReturnValue({
+              eq: vi.fn().mockReturnValue({
+                limit: vi.fn().mockResolvedValue({
+                  data: [{ document_id: 'doc-1' }],
+                  error: null,
+                }),
+              }),
+            }),
+          }),
+        };
+      }
+
+      if (table === 'document_versions') {
+        return {
+          select: vi.fn().mockReturnValue({
+            eq: vi.fn().mockReturnValue({
+              order: vi.fn().mockResolvedValue({
+                data: [{ version_label: 'V1.0.0' }],
+                error: null,
+              }),
+            }),
+          }),
+          insert: insertVersion,
+        };
+      }
+
+      if (table === 'document_keys') {
+        return {
+          select: vi.fn().mockImplementation((columns: string) => {
+            if (columns === 'wrapped_document_key, key_version') {
+              return {
+                eq: vi.fn().mockReturnValue({
+                  eq: vi.fn().mockReturnValue({
+                    order: vi.fn().mockReturnValue({
+                      limit: vi.fn().mockResolvedValue({
+                        data: [{ wrapped_document_key: 'editor-current-key', key_version: 3 }],
+                        error: null,
+                      }),
+                    }),
+                  }),
+                }),
+              };
+            }
+            if (columns === 'user_id') {
+              return {
+                eq: vi.fn().mockResolvedValue({
+                  data: [{ user_id: 'owner-1' }, { user_id: 'member-1' }, { user_id: 'member-2' }],
+                  error: null,
+                }),
+              };
+            }
+            return { eq: vi.fn() };
+          }),
+          insert: insertKeys,
+        };
+      }
+
+      return {};
+    });
+
+    const blob = new Blob(['shared-doc'], { type: 'application/vnd.openxmlformats-officedocument.wordprocessingml.document' });
+
+    // Act & Assert: 适配层抛错时，共享保存应传播异常
+    await expect(
+      saveSharedDocumentVersion({
+        documentId: 'doc-1',
+        editorUserId: 'member-1',
+        editorEmail: 'member-1@example.com',
+        teamId: 'team-1',
+        blob,
+        fileName: 'shared.docx',
+        version: 'V1.1.0',
+        remark: 'member update',
+        selectedKeys: ['k2'],
+      }),
+    ).rejects.toThrow('Worker unavailable');
+  });
+
+  beforeEach(() => {
+    resetMocks();
+    vi.spyOn(console, 'info').mockImplementation(() => undefined);
+    vi.spyOn(console, 'error').mockImplementation(() => undefined);
+  });
+
+  afterEach(() => {
+    vi.restoreAllMocks();
+  });
 
   it('fetchPersonalDocumentsForCurrentTeam excludes docs shared in the current team', async () => {
     const fromMock = supabase.from as unknown as MockFn;
@@ -628,5 +785,583 @@ describe('current-team document list queries', () => {
     expect(update).toHaveBeenCalledTimes(1);
     expect(vi.mocked(cryptoKeyService.distributeDocumentKey)).toHaveBeenCalledWith('doc-1', expect.anything(), 'owner-1', 4);
     expect(vi.mocked(cryptoKeyService.distributeDocumentKey)).toHaveBeenCalledWith('doc-1', expect.anything(), 'member-2', 4);
+  });
+
+  it('输出共享保存 telemetry 阶段日志并包含分发成员数', async () => {
+    const fromMock = supabase.from as unknown as MockFn;
+    const invokeMock = supabase.functions.invoke as unknown as MockFn;
+
+    invokeMock.mockResolvedValue({
+      data: {
+        url: 'https://r2.example.com/shared-put',
+        method: 'PUT',
+        headers: { 'Content-Type': 'application/octet-stream' },
+        expiresAt: new Date(Date.now() + 300000).toISOString(),
+        r2Key: 'pfm-trae/dev/documents/doc-1/new-ver-uuid/hash.bin',
+      },
+      error: null,
+    });
+
+    global.fetch = vi.fn().mockResolvedValue({ ok: true, status: 200 } as Response);
+    vi.mocked(cryptoKeyService.generateDocumentKey).mockResolvedValue({ type: 'secret' } as unknown as CryptoKey);
+    vi.mocked(cryptoKeyService.wrapDocumentKey).mockResolvedValue('editor-wrapped-key');
+    vi.mocked(cryptoKeyService.distributeDocumentKey).mockResolvedValue(undefined);
+
+    const documentSingle = vi.fn().mockResolvedValue({
+      data: {
+        id: 'doc-1',
+        owner_id: 'owner-1',
+        encrypted_title: '共享文档',
+        metadata: {
+          latestVersion: 'V1.0.0',
+          latestRemark: 'old',
+          versions: [{ version: 'V1.0.0', remark: 'old', author: 'owner@example.com', createdAt: '2026-05-01T00:00:00Z', sizeBytes: 100 }],
+          selectedKeys: ['k1'],
+          encryption: { enabled: true, version: 2 },
+        },
+      },
+      error: null,
+    });
+
+    const updateEq = vi.fn().mockResolvedValue({ error: null });
+    const update = vi.fn().mockReturnValue({ eq: updateEq });
+    const insertVersion = vi.fn().mockResolvedValue({ error: null });
+    const insertKeys = vi.fn().mockResolvedValue({ error: null });
+
+    fromMock.mockImplementation((table: string) => {
+      if (table === 'documents') {
+        return {
+          select: vi.fn().mockReturnValue({
+            eq: vi.fn().mockReturnValue({ single: documentSingle }),
+          }),
+          update,
+        };
+      }
+
+      if (table === 'document_shares') {
+        return {
+          select: vi.fn().mockReturnValue({
+            eq: vi.fn().mockReturnValue({
+              eq: vi.fn().mockReturnValue({
+                limit: vi.fn().mockResolvedValue({
+                  data: [{ document_id: 'doc-1' }],
+                  error: null,
+                }),
+              }),
+            }),
+          }),
+        };
+      }
+
+      if (table === 'document_versions') {
+        return {
+          select: vi.fn().mockReturnValue({
+            eq: vi.fn().mockReturnValue({
+              order: vi.fn().mockResolvedValue({
+                data: [{ version_label: 'V1.0.0' }],
+                error: null,
+              }),
+            }),
+          }),
+          insert: insertVersion,
+        };
+      }
+
+      if (table === 'document_keys') {
+        return {
+          select: vi.fn().mockImplementation((columns: string) => {
+            if (columns === 'wrapped_document_key, key_version') {
+              return {
+                eq: vi.fn().mockReturnValue({
+                  eq: vi.fn().mockReturnValue({
+                    order: vi.fn().mockReturnValue({
+                      limit: vi.fn().mockResolvedValue({
+                        data: [{ wrapped_document_key: 'editor-current-key', key_version: 3 }],
+                        error: null,
+                      }),
+                    }),
+                  }),
+                }),
+              };
+            }
+            if (columns === 'user_id') {
+              return {
+                eq: vi.fn().mockResolvedValue({
+                  data: [{ user_id: 'owner-1' }, { user_id: 'member-1' }, { user_id: 'member-2' }],
+                  error: null,
+                }),
+              };
+            }
+            return { eq: vi.fn() };
+          }),
+          insert: insertKeys,
+        };
+      }
+
+      return {};
+    });
+
+    const blob = new Blob(['shared-doc'], { type: 'application/vnd.openxmlformats-officedocument.wordprocessingml.document' });
+
+    const result = await saveSharedDocumentVersion({
+      documentId: 'doc-1',
+      editorUserId: 'member-1',
+      editorEmail: 'member-1@example.com',
+      teamId: 'team-1',
+      blob,
+      fileName: 'shared.docx',
+      version: 'V1.1.0',
+      remark: 'member update',
+      selectedKeys: ['k2'],
+    });
+
+    expect(result.documentId).toBe('doc-1');
+
+    const infoCalls = vi.mocked(console.info).mock.calls
+      .map(([message, payload]) => ({ message, payload }))
+      .filter((call) => call.message === '[document-save]');
+
+    expect(infoCalls.length).toBeGreaterThan(0);
+    expect(infoCalls.some((call) => call.payload?.mode === 'shared' && call.payload?.step === 'save_started')).toBe(true);
+    expect(infoCalls.some((call) => call.payload?.step === 'encryption' && call.payload?.status === 'start')).toBe(true);
+    expect(infoCalls.some((call) => call.payload?.step === 'upload' && call.payload?.status === 'end' && typeof call.payload?.durationMs === 'number')).toBe(true);
+    expect(infoCalls.some((call) => call.payload?.step === 'documents_write' && call.payload?.status === 'end')).toBe(true);
+    expect(infoCalls.some((call) => call.payload?.step === 'document_versions_write' && call.payload?.status === 'end')).toBe(true);
+    expect(infoCalls.some((call) => call.payload?.step === 'document_keys_write' && call.payload?.status === 'end')).toBe(true);
+    expect(infoCalls.some((call) => call.payload?.step === 'shared_users_fetch' && call.payload?.status === 'end' && call.payload?.memberCount === 3)).toBe(true);
+    expect(infoCalls.some((call) => call.payload?.step === 'key_distribution' && call.payload?.status === 'start' && call.payload?.memberCount === 2)).toBe(true);
+    expect(infoCalls.some((call) => call.payload?.step === 'key_distribution' && call.payload?.status === 'end' && call.payload?.memberCount === 2 && typeof call.payload?.durationMs === 'number' && call.payload?.actualDistributed === 2 && typeof call.payload?.concurrency === 'number')).toBe(true);
+    expect(infoCalls.some((call) => call.payload?.step === 'save_finished' && call.payload?.documentId === 'doc-1' && call.payload?.versionId === 'mock-ver-id' && call.payload?.fileSize === blob.size && call.payload?.memberCount === 2 && typeof call.payload?.durationMs === 'number')).toBe(true);
+  });
+
+  it('共享保存 telemetry 记录失败但不吞掉原始异常', async () => {
+    const fromMock = supabase.from as unknown as MockFn;
+    const invokeMock = supabase.functions.invoke as unknown as MockFn;
+
+    invokeMock.mockResolvedValue({
+      data: {
+        url: 'https://r2.example.com/shared-put',
+        method: 'PUT',
+        headers: { 'Content-Type': 'application/octet-stream' },
+        expiresAt: new Date(Date.now() + 300000).toISOString(),
+        r2Key: 'pfm-trae/dev/documents/doc-1/new-ver-uuid/hash.bin',
+      },
+      error: null,
+    });
+
+    global.fetch = vi.fn().mockResolvedValue({ ok: true, status: 200 } as Response);
+    vi.mocked(cryptoKeyService.generateDocumentKey).mockResolvedValue({ type: 'secret' } as unknown as CryptoKey);
+    vi.mocked(cryptoKeyService.wrapDocumentKey).mockResolvedValue('editor-wrapped-key');
+    vi.mocked(cryptoKeyService.distributeDocumentKey).mockImplementation(async (_docId, _key, userId) => {
+      if (userId === 'member-2') {
+        throw new Error('分发失败');
+      }
+    });
+
+    const documentSingle = vi.fn().mockResolvedValue({
+      data: {
+        id: 'doc-1',
+        owner_id: 'owner-1',
+        encrypted_title: '共享文档',
+        metadata: {
+          latestVersion: 'V1.0.0',
+          latestRemark: 'old',
+          versions: [{ version: 'V1.0.0', remark: 'old', author: 'owner@example.com', createdAt: '2026-05-01T00:00:00Z', sizeBytes: 100 }],
+          selectedKeys: ['k1'],
+          encryption: { enabled: true, version: 2 },
+        },
+      },
+      error: null,
+    });
+
+    const updateEq = vi.fn().mockResolvedValue({ error: null });
+    const update = vi.fn().mockReturnValue({ eq: updateEq });
+    const insertVersion = vi.fn().mockResolvedValue({ error: null });
+    const insertKeys = vi.fn().mockResolvedValue({ error: null });
+
+    fromMock.mockImplementation((table: string) => {
+      if (table === 'documents') {
+        return {
+          select: vi.fn().mockReturnValue({
+            eq: vi.fn().mockReturnValue({ single: documentSingle }),
+          }),
+          update,
+        };
+      }
+
+      if (table === 'document_shares') {
+        return {
+          select: vi.fn().mockReturnValue({
+            eq: vi.fn().mockReturnValue({
+              eq: vi.fn().mockReturnValue({
+                limit: vi.fn().mockResolvedValue({
+                  data: [{ document_id: 'doc-1' }],
+                  error: null,
+                }),
+              }),
+            }),
+          }),
+        };
+      }
+
+      if (table === 'document_versions') {
+        return {
+          select: vi.fn().mockReturnValue({
+            eq: vi.fn().mockReturnValue({
+              order: vi.fn().mockResolvedValue({
+                data: [{ version_label: 'V1.0.0' }],
+                error: null,
+              }),
+            }),
+          }),
+          insert: insertVersion,
+        };
+      }
+
+      if (table === 'document_keys') {
+        return {
+          select: vi.fn().mockImplementation((columns: string) => {
+            if (columns === 'wrapped_document_key, key_version') {
+              return {
+                eq: vi.fn().mockReturnValue({
+                  eq: vi.fn().mockReturnValue({
+                    order: vi.fn().mockReturnValue({
+                      limit: vi.fn().mockResolvedValue({
+                        data: [{ wrapped_document_key: 'editor-current-key', key_version: 3 }],
+                        error: null,
+                      }),
+                    }),
+                  }),
+                }),
+              };
+            }
+            if (columns === 'user_id') {
+              return {
+                eq: vi.fn().mockResolvedValue({
+                  data: [{ user_id: 'owner-1' }, { user_id: 'member-1' }, { user_id: 'member-2' }],
+                  error: null,
+                }),
+              };
+            }
+            return { eq: vi.fn() };
+          }),
+          insert: insertKeys,
+        };
+      }
+
+      return {};
+    });
+
+    const blob = new Blob(['shared-doc'], { type: 'application/vnd.openxmlformats-officedocument.wordprocessingml.document' });
+
+    await expect(saveSharedDocumentVersion({
+      documentId: 'doc-1',
+      editorUserId: 'member-1',
+      editorEmail: 'member-1@example.com',
+      teamId: 'team-1',
+      blob,
+      fileName: 'shared.docx',
+      version: 'V1.1.0',
+      remark: 'member update',
+      selectedKeys: ['k2'],
+    })).rejects.toThrow('分发失败');
+
+    const errorCalls = vi.mocked(console.error).mock.calls
+      .map(([message, payload]) => ({ message, payload }))
+      .filter((call) => call.message === '[document-save]');
+
+    expect(errorCalls.some((call) => call.payload?.mode === 'shared' && call.payload?.step === 'key_distribution' && call.payload?.status === 'failure' && call.payload?.documentId === 'doc-1' && call.payload?.versionId === 'mock-ver-id' && call.payload?.memberCount === 2 && call.payload?.fileSize === blob.size && typeof call.payload?.durationMs === 'number' && typeof call.payload?.error === 'string' && call.payload?.error.includes('分发失败'))).toBe(true);
+  });
+
+  it('共享保存 onProgress 被调用：成功时依次经过 preparing → encrypting → uploading → persisting → done', async () => {
+    const fromMock = supabase.from as unknown as MockFn;
+    const invokeMock = supabase.functions.invoke as unknown as MockFn;
+
+    invokeMock.mockResolvedValue({
+      data: {
+        url: 'https://r2.example.com/shared-put',
+        method: 'PUT',
+        headers: { 'Content-Type': 'application/octet-stream' },
+        expiresAt: new Date(Date.now() + 300000).toISOString(),
+        r2Key: 'pfm-trae/dev/documents/doc-1/new-ver-uuid/hash.bin',
+      },
+      error: null,
+    });
+
+    global.fetch = vi.fn().mockResolvedValue({ ok: true, status: 200 } as Response);
+    vi.mocked(cryptoKeyService.generateDocumentKey).mockResolvedValue({ type: 'secret' } as unknown as CryptoKey);
+    vi.mocked(cryptoKeyService.wrapDocumentKey).mockResolvedValue('editor-wrapped-key');
+    vi.mocked(cryptoKeyService.distributeDocumentKey).mockResolvedValue(undefined);
+
+    // Mock Worker adapter to simulate chunk progress
+    vi.mocked(documentEncryptionWorker.encryptDocumentChunkedViaWorker).mockImplementation(
+      async (_input, options?: { onProgress?: (chunkIndex: number, totalChunks: number) => void }) => {
+        options?.onProgress?.(0, 3);
+        options?.onProgress?.(1, 3);
+        options?.onProgress?.(2, 3);
+        return {
+          blob: new Blob(['encrypted'], { type: 'application/octet-stream' }),
+          contentHash: 'shared-hash',
+        };
+      },
+    );
+
+    const documentSingle = vi.fn().mockResolvedValue({
+      data: {
+        id: 'doc-1',
+        owner_id: 'owner-1',
+        encrypted_title: '共享文档',
+        metadata: {
+          latestVersion: 'V1.0.0',
+          latestRemark: 'old',
+          versions: [{ version: 'V1.0.0', remark: 'old', author: 'owner@example.com', createdAt: '2026-05-01T00:00:00Z', sizeBytes: 100 }],
+          selectedKeys: ['k1'],
+          encryption: { enabled: true, version: 2 },
+        },
+      },
+      error: null,
+    });
+
+    const updateEq = vi.fn().mockResolvedValue({ error: null });
+    const update = vi.fn().mockReturnValue({ eq: updateEq });
+    const insertVersion = vi.fn().mockResolvedValue({ error: null });
+    const insertKeys = vi.fn().mockResolvedValue({ error: null });
+
+    fromMock.mockImplementation((table: string) => {
+      if (table === 'documents') {
+        return {
+          select: vi.fn().mockReturnValue({
+            eq: vi.fn().mockReturnValue({ single: documentSingle }),
+          }),
+          update,
+        };
+      }
+
+      if (table === 'document_shares') {
+        return {
+          select: vi.fn().mockReturnValue({
+            eq: vi.fn().mockReturnValue({
+              eq: vi.fn().mockReturnValue({
+                limit: vi.fn().mockResolvedValue({
+                  data: [{ document_id: 'doc-1' }],
+                  error: null,
+                }),
+              }),
+            }),
+          }),
+        };
+      }
+
+      if (table === 'document_versions') {
+        return {
+          select: vi.fn().mockReturnValue({
+            eq: vi.fn().mockReturnValue({
+              order: vi.fn().mockResolvedValue({
+                data: [{ version_label: 'V1.0.0' }],
+                error: null,
+              }),
+            }),
+          }),
+          insert: insertVersion,
+        };
+      }
+
+      if (table === 'document_keys') {
+        return {
+          select: vi.fn().mockImplementation((columns: string) => {
+            if (columns === 'wrapped_document_key, key_version') {
+              return {
+                eq: vi.fn().mockReturnValue({
+                  eq: vi.fn().mockReturnValue({
+                    order: vi.fn().mockReturnValue({
+                      limit: vi.fn().mockResolvedValue({
+                        data: [{ wrapped_document_key: 'editor-current-key', key_version: 3 }],
+                        error: null,
+                      }),
+                    }),
+                  }),
+                }),
+              };
+            }
+            if (columns === 'user_id') {
+              return {
+                eq: vi.fn().mockResolvedValue({
+                  data: [{ user_id: 'owner-1' }, { user_id: 'member-1' }, { user_id: 'member-2' }],
+                  error: null,
+                }),
+              };
+            }
+            return { eq: vi.fn() };
+          }),
+          insert: insertKeys,
+        };
+      }
+
+      return {};
+    });
+
+    const blob = new Blob(['shared-doc'], { type: 'application/vnd.openxmlformats-officedocument.wordprocessingml.document' });
+    const onProgress = vi.fn();
+
+    const result = await saveSharedDocumentVersion({
+      documentId: 'doc-1',
+      editorUserId: 'member-1',
+      editorEmail: 'member-1@example.com',
+      teamId: 'team-1',
+      blob,
+      fileName: 'shared.docx',
+      version: 'V1.1.0',
+      remark: 'member update',
+      selectedKeys: ['k2'],
+      onProgress,
+    });
+
+    expect(result.documentId).toBe('doc-1');
+
+    const stages = onProgress.mock.calls.map(([info]: [{ stage: string }]) => info.stage);
+    expect(stages).toContain('preparing');
+    expect(stages).toContain('encrypting');
+    expect(stages).toContain('uploading');
+    expect(stages).toContain('persisting');
+    expect(stages).toContain('done');
+
+    // done 是最后一个 stage
+    expect(stages[stages.length - 1]).toBe('done');
+
+    // 验证 done 的 percent 和 message
+    const doneCall = onProgress.mock.calls.find(
+      ([info]: [{ stage: string }]) => info.stage === 'done',
+    );
+    expect(doneCall![0].percent).toBe(100);
+    expect(doneCall![0].message).toBe('保存完成');
+  });
+
+  it('共享保存 onProgress 被调用：失败时最后一个 stage 是 failed', async () => {
+    vi.mocked(documentEncryptionWorker.encryptDocumentChunkedViaWorker).mockRejectedValue(
+      new Error('Worker unavailable'),
+    );
+
+    const fromMock = supabase.from as unknown as MockFn;
+    const invokeMock = supabase.functions.invoke as unknown as MockFn;
+
+    invokeMock.mockResolvedValue({
+      data: {
+        url: 'https://r2.example.com/shared-put',
+        method: 'PUT',
+        headers: { 'Content-Type': 'application/octet-stream' },
+        expiresAt: new Date(Date.now() + 300000).toISOString(),
+        r2Key: 'pfm-trae/dev/documents/doc-1/new-ver-uuid/hash.bin',
+      },
+      error: null,
+    });
+
+    global.fetch = vi.fn().mockResolvedValue({ ok: true, status: 200 } as Response);
+
+    const documentSingle = vi.fn().mockResolvedValue({
+      data: {
+        id: 'doc-1',
+        owner_id: 'owner-1',
+        encrypted_title: '共享文档',
+        metadata: {
+          latestVersion: 'V1.0.0',
+          latestRemark: 'old',
+          versions: [],
+          selectedKeys: ['k1'],
+          encryption: { enabled: true, version: 2 },
+        },
+      },
+      error: null,
+    });
+
+    fromMock.mockImplementation((table: string) => {
+      if (table === 'documents') {
+        return {
+          select: vi.fn().mockReturnValue({
+            eq: vi.fn().mockReturnValue({ single: documentSingle }),
+          }),
+          update: vi.fn().mockReturnValue({ eq: vi.fn().mockResolvedValue({ error: null }) }),
+        };
+      }
+
+      if (table === 'document_shares') {
+        return {
+          select: vi.fn().mockReturnValue({
+            eq: vi.fn().mockReturnValue({
+              eq: vi.fn().mockReturnValue({
+                limit: vi.fn().mockResolvedValue({
+                  data: [{ document_id: 'doc-1' }],
+                  error: null,
+                }),
+              }),
+            }),
+          }),
+        };
+      }
+
+      if (table === 'document_versions') {
+        return {
+          select: vi.fn().mockReturnValue({
+            eq: vi.fn().mockReturnValue({
+              order: vi.fn().mockResolvedValue({
+                data: [],
+                error: null,
+              }),
+            }),
+          }),
+          insert: vi.fn().mockResolvedValue({ error: null }),
+        };
+      }
+
+      if (table === 'document_keys') {
+        return {
+          select: vi.fn().mockImplementation((columns: string) => {
+            if (columns === 'wrapped_document_key, key_version') {
+              return {
+                eq: vi.fn().mockReturnValue({
+                  eq: vi.fn().mockReturnValue({
+                    order: vi.fn().mockReturnValue({
+                      limit: vi.fn().mockResolvedValue({
+                        data: [{ wrapped_document_key: 'editor-current-key', key_version: 3 }],
+                        error: null,
+                      }),
+                    }),
+                  }),
+                }),
+              };
+            }
+            return { eq: vi.fn() };
+          }),
+          insert: vi.fn().mockResolvedValue({ error: null }),
+        };
+      }
+
+      return {};
+    });
+
+    const blob = new Blob(['shared-doc'], { type: 'application/vnd.openxmlformats-officedocument.wordprocessingml.document' });
+    const onProgress = vi.fn();
+
+    await expect(
+      saveSharedDocumentVersion({
+        documentId: 'doc-1',
+        editorUserId: 'member-1',
+        editorEmail: 'member-1@example.com',
+        teamId: 'team-1',
+        blob,
+        fileName: 'shared.docx',
+        version: 'V1.1.0',
+        remark: 'member update',
+        selectedKeys: ['k2'],
+        onProgress,
+      }),
+    ).rejects.toThrow('Worker unavailable');
+
+    const stages = onProgress.mock.calls.map(([info]: [{ stage: string }]) => info.stage);
+    expect(stages[stages.length - 1]).toBe('failed');
+
+    const failedCall = onProgress.mock.calls.find(
+      ([info]: [{ stage: string }]) => info.stage === 'failed',
+    );
+    expect(failedCall![0].message).toBe('保存失败');
   });
 });
