@@ -8,7 +8,7 @@
 
 export type DistributeKeyToMemberInput = {
   documentId: string;
-  wrappedKey: string;
+  wrappedKey: CryptoKey;
   targetUserIds: string[];
   keyVersion: number;
   concurrency?: number; // default 4
@@ -24,7 +24,7 @@ export type DistributeKeyResult = {
 
 export type DistributeKeyFn = (
   documentId: string,
-  wrappedKey: string,
+  wrappedKey: CryptoKey,
   userId: string,
   keyVersion: number,
 ) => Promise<void>;

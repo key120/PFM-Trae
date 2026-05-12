@@ -1244,7 +1244,7 @@ export async function saveSharedDocumentVersion(
 
     telemetry.markStepStart('key_distribution', { memberCount: distributionMemberCount });
     try {
-      const { distributed, failed, actualDistributed, concurrencyUsed, durationMs } = await distributeDocumentKeyConcurrently(
+      const { failed, actualDistributed, concurrencyUsed } = await distributeDocumentKeyConcurrently(
         {
           documentId: input.documentId,
           wrappedKey: nextDocumentKey,

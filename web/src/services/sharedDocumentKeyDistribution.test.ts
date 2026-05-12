@@ -4,6 +4,8 @@ import {
   type DistributeKeyFn,
 } from './sharedDocumentKeyDistribution';
 
+const mockKey = { type: 'secret', algorithm: { name: 'AES-GCM' } } as unknown as CryptoKey;
+
 function createMockDistributeFn(
   behavior?: (userId: string) => Promise<void> | void,
 ): DistributeKeyFn {
@@ -20,7 +22,7 @@ describe('distributeDocumentKeyConcurrently', () => {
     const result = await distributeDocumentKeyConcurrently(
       {
         documentId: 'doc-1',
-        wrappedKey: 'wrapped-key',
+        wrappedKey: mockKey,
         targetUserIds: ['user-a', 'user-b', 'user-c'],
         keyVersion: 2,
       },
@@ -30,9 +32,9 @@ describe('distributeDocumentKeyConcurrently', () => {
     expect(result.distributed).toEqual(['user-a', 'user-b', 'user-c']);
     expect(result.failed).toHaveLength(0);
     expect(distributeFn).toHaveBeenCalledTimes(3);
-    expect(distributeFn).toHaveBeenCalledWith('doc-1', 'wrapped-key', 'user-a', 2);
-    expect(distributeFn).toHaveBeenCalledWith('doc-1', 'wrapped-key', 'user-b', 2);
-    expect(distributeFn).toHaveBeenCalledWith('doc-1', 'wrapped-key', 'user-c', 2);
+    expect(distributeFn).toHaveBeenCalledWith('doc-1', mockKey, 'user-a', 2);
+    expect(distributeFn).toHaveBeenCalledWith('doc-1', mockKey, 'user-b', 2);
+    expect(distributeFn).toHaveBeenCalledWith('doc-1', mockKey, 'user-c', 2);
   });
 
   it('部分用户失败时 failed 包含对应的 userId 和 reason', async () => {
@@ -45,7 +47,7 @@ describe('distributeDocumentKeyConcurrently', () => {
     const result = await distributeDocumentKeyConcurrently(
       {
         documentId: 'doc-1',
-        wrappedKey: 'wrapped-key',
+        wrappedKey: mockKey,
         targetUserIds: ['user-a', 'user-b', 'user-c'],
         keyVersion: 3,
       },
@@ -70,7 +72,7 @@ describe('distributeDocumentKeyConcurrently', () => {
     const result = await distributeDocumentKeyConcurrently(
       {
         documentId: 'doc-1',
-        wrappedKey: 'wrapped-key',
+        wrappedKey: mockKey,
         targetUserIds: ['user-x'],
         keyVersion: 1,
       },
@@ -93,7 +95,7 @@ describe('distributeDocumentKeyConcurrently', () => {
     const result = await distributeDocumentKeyConcurrently(
       {
         documentId: 'doc-1',
-        wrappedKey: 'wrapped-key',
+        wrappedKey: mockKey,
         targetUserIds: ['user-a', 'user-b'],
         keyVersion: 1,
       },
@@ -112,7 +114,7 @@ describe('distributeDocumentKeyConcurrently', () => {
     const result = await distributeDocumentKeyConcurrently(
       {
         documentId: 'doc-1',
-        wrappedKey: 'wrapped-key',
+        wrappedKey: mockKey,
         targetUserIds: [],
         keyVersion: 1,
       },
@@ -146,7 +148,7 @@ describe('distributeDocumentKeyConcurrently', () => {
     const result = await distributeDocumentKeyConcurrently(
       {
         documentId: 'doc-1',
-        wrappedKey: 'wrapped-key',
+        wrappedKey: mockKey,
         targetUserIds: ['u1', 'u2', 'u3', 'u4', 'u5', 'u6'],
         keyVersion: 1,
         concurrency: 2,
@@ -167,7 +169,7 @@ describe('distributeDocumentKeyConcurrently', () => {
     const result = await distributeDocumentKeyConcurrently(
       {
         documentId: 'doc-1',
-        wrappedKey: 'wrapped-key',
+        wrappedKey: mockKey,
         targetUserIds: ['user-a', 'user-b', 'user-c'],
         keyVersion: 2,
         concurrency: 2,
@@ -191,7 +193,7 @@ describe('distributeDocumentKeyConcurrently', () => {
     const result = await distributeDocumentKeyConcurrently(
       {
         documentId: 'doc-1',
-        wrappedKey: 'wrapped-key',
+        wrappedKey: mockKey,
         targetUserIds: ['user-a', 'user-b', 'user-c'],
         keyVersion: 1,
         concurrency: 4,
@@ -210,7 +212,7 @@ describe('distributeDocumentKeyConcurrently', () => {
     const result = await distributeDocumentKeyConcurrently(
       {
         documentId: 'doc-1',
-        wrappedKey: 'wrapped-key',
+        wrappedKey: mockKey,
         targetUserIds: [],
         keyVersion: 1,
       },
@@ -236,7 +238,7 @@ describe('distributeDocumentKeyConcurrently', () => {
     const result = await distributeDocumentKeyConcurrently(
       {
         documentId: 'doc-1',
-        wrappedKey: 'wrapped-key',
+        wrappedKey: mockKey,
         targetUserIds: ['u1', 'u2', 'u3', 'u4', 'u5', 'u6', 'u7', 'u8'],
         keyVersion: 1,
       },
