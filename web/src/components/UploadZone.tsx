@@ -75,20 +75,29 @@ const UploadZone: React.FC<UploadZoneProps> = ({ variant = 'dragger' }) => {
 
   return (
     <div style={{ width: '100%', padding: '0 16px' }}>
-      <Dragger {...props} style={{ padding: '20px 0' }}>
+      <style>{`
+        .upload-zone-dragger:hover {
+          border-color: #1677ff !important;
+          background: rgba(22, 119, 255, 0.02) !important;
+        }
+        .upload-zone-dragger {
+          transition: border-color 0.2s, background 0.2s !important;
+        }
+      `}</style>
+      <Dragger {...props} className="upload-zone-dragger" style={{ padding: '32px 0', minHeight: '180px' }}>
         <p className="ant-upload-drag-icon">
-          <span role="img" aria-label="inbox" className="anticon" style={{ fontSize: '40px', color: '#1677ff' }}>
+          <span role="img" aria-label="inbox" className="anticon" style={{ fontSize: '48px', color: '#1677ff' }}>
             <svg width="1em" height="1em" viewBox="0 0 48 48" fill="none" xmlns="http://www.w3.org/2000/svg">
               <path d="M5 30L10 6H38L43 30" stroke="currentColor" strokeWidth="1.5" strokeLinecap="round" strokeLinejoin="round"/>
               <path d="M5 30H14.9L16.7 36H31.3L33.1 30H43V42H5V30Z" stroke="currentColor" strokeWidth="1.5" strokeLinecap="round" strokeLinejoin="round"/>
             </svg>
           </span>
         </p>
-        <p className="ant-upload-text" style={{ fontSize: '14px', fontWeight: 500 }}>
+        <p className="ant-upload-text" style={{ fontSize: '14px', fontWeight: 500, color: '#262626' }}>
           将文件拖到此处上传
         </p>
-        <p className="ant-upload-hint" style={{ fontSize: '12px', color: '#8c8c8c' }}>
-          或者，您可以 <span style={{ color: '#1677ff', cursor: 'pointer' }}>点击上传</span>
+        <p className="ant-upload-hint" style={{ fontSize: '13px', color: '#8c8c8c' }}>
+          或者，您可以 <span style={{ color: '#1677ff', cursor: 'pointer', fontWeight: 500 }}>点击上传</span>
         </p>
         <p className="ant-upload-hint" style={{ fontSize: '12px', color: '#bfbfbf', marginTop: 8 }}>
           仅支持 DOCX 格式，文件大小限制 50MB

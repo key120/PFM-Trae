@@ -2,8 +2,73 @@ import { describe, expect, it, vi } from 'vitest';
 import { render, screen, waitFor } from '@testing-library/react';
 import userEvent from '@testing-library/user-event';
 import SaveDocumentModal from './SaveDocumentModal';
+import type { SaveProgressInfo } from '../services/documentSaveProgress';
 
 describe('SaveDocumentModal', () => {
+  it('保存中会展示阶段文案与进度条，作为后续进度 UI 的稳定断言位置', async () => {
+    const handleOk = vi.fn();
+    const handleCancel = vi.fn();
+    const progress: SaveProgressInfo = {
+      stage: 'encrypting',
+      percent: 46,
+      message: '加密中...',
+    };
+
+    render(
+      <SaveDocumentModal
+        open
+        confirmLoading
+        saving
+        saveProgress={progress}
+        onOk={handleOk}
+        onCancel={handleCancel}
+      />,
+    );
+
+    expect(screen.getByText('加密中...')).toBeInTheDocument();
+    const progressEl = document.querySelector('.ant-progress');
+    expect(progressEl).toBeTruthy();
+  });
+
+  it('保存中会限制取消关闭，保存结束后恢复正常关闭行为', async () => {
+    const handleOk = vi.fn();
+    const handleCancel = vi.fn();
+    const user = userEvent.setup();
+
+    const { rerender } = render(
+      <SaveDocumentModal
+        open
+        confirmLoading
+        saving
+        saveProgress={{ stage: 'encrypting', percent: 30, message: '加密中...' }}
+        onOk={handleOk}
+        onCancel={handleCancel}
+      />,
+    );
+
+    // cancel button is disabled during saving
+    const cancelButton = screen.getByRole('button', { name: /取.*消/ });
+    expect(cancelButton).toBeDisabled();
+
+    // re-render with saving=false
+    rerender(
+      <SaveDocumentModal
+        open
+        confirmLoading={false}
+        saving={false}
+        saveProgress={null}
+        onOk={handleOk}
+        onCancel={handleCancel}
+      />,
+    );
+
+    const cancelButtonAfter = screen.getByRole('button', { name: /取.*消/ });
+    expect(cancelButtonAfter).not.toBeDisabled();
+
+    await user.click(cancelButtonAfter);
+    expect(handleCancel).toHaveBeenCalled();
+  });
+
   it('打开时使用默认版本号和空备注', async () => {
     const handleOk = vi.fn();
     const handleCancel = vi.fn();

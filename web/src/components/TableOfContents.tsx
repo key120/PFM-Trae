@@ -67,7 +67,7 @@ const TableOfContents: React.FC<TableOfContentsProps> = ({ onSelect }) => {
     }
     
     return (
-      <Tooltip title={headingNode.title} mouseEnterDelay={1}>
+      <Tooltip title={headingNode.title} mouseEnterDelay={0.3}>
         <span style={{ 
           overflow: 'hidden', 
           textOverflow: 'ellipsis', 

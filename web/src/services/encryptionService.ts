@@ -1,4 +1,12 @@
 import type { DocumentKey } from './cryptoKeyService';
+import {
+  DEFAULT_DOCUMENT_CHUNK_SIZE,
+  computeMetadataHash,
+  readUint32,
+  toHex,
+  writeUint32,
+  type ChunkedEncryptionHeaderV2,
+} from './documentEncryptionShared';
 
 export type EncryptDocumentMeta = {
   title?: string;
@@ -50,16 +58,6 @@ export class EncryptedBlobIntegrityError extends Error {
 const textEncoder = new TextEncoder();
 const textDecoder = new TextDecoder();
 
-const toHex = (buffer: ArrayBuffer): string => {
-  const view = new Uint8Array(buffer);
-  let result = '';
-  for (let i = 0; i < view.length; i += 1) {
-    const value = view[i]?.toString(16).padStart(2, '0') ?? '00';
-    result += value;
-  }
-  return result;
-};
-
 const bytesToBase64 = (bytes: Uint8Array): string => {
   let binary = '';
   for (let i = 0; i < bytes.length; i += 1) {
@@ -75,14 +73,6 @@ const base64ToBytes = (value: string): Uint8Array => {
     result[i] = binary.charCodeAt(i);
   }
   return result;
-};
-
-const writeUint32 = (view: DataView, offset: number, value: number) => {
-  view.setUint32(offset, value, false);
-};
-
-const readUint32 = (view: DataView, offset: number): number => {
-  return view.getUint32(offset, false);
 };
 
 const blobToArrayBuffer = (value: Blob): Promise<ArrayBuffer> => {
@@ -140,8 +130,7 @@ export const encryptDocument = async (input: EncryptDocumentInput): Promise<Blob
     plaintext,
   );
 
-  const metaHashBuffer = await crypto.subtle.digest('SHA-256', textEncoder.encode(metaJson));
-  const metaHash = toHex(metaHashBuffer);
+  const metaHash = await computeMetadataHash(metaJson);
 
   const header = {
     version: 1,
@@ -256,8 +245,7 @@ export const decryptDocument = async (
   const metaBytes = plaintextBytes.slice(4, 4 + metaLen);
   const metaJson = textDecoder.decode(metaBytes);
 
-  const computedHashBuffer = await crypto.subtle.digest('SHA-256', textEncoder.encode(metaJson));
-  const computedHash = toHex(computedHashBuffer);
+  const computedHash = await computeMetadataHash(metaJson);
 
   if (computedHash !== header.metaHash) {
     throw new EncryptedBlobIntegrityError('Metadata hash does not match');
@@ -305,7 +293,7 @@ export const encryptDocumentChunked = async (
   plaintext.set(metaBytes, 4);
   plaintext.set(new Uint8Array(fileBuffer), 4 + metaBytes.byteLength);
 
-  const chunkSize = options?.chunkSize ?? 1024 * 1024;
+  const chunkSize = options?.chunkSize ?? DEFAULT_DOCUMENT_CHUNK_SIZE;
   const totalLength = plaintext.byteLength;
   const chunkCount = Math.ceil(totalLength / chunkSize);
 
@@ -341,12 +329,11 @@ export const encryptDocumentChunked = async (
     chunks.push(combined);
   }
 
-  const metaHashBuffer = await crypto.subtle.digest('SHA-256', textEncoder.encode(metaJson));
-  const metaHash = toHex(metaHashBuffer);
+  const metaHash = await computeMetadataHash(metaJson);
 
-  const header = {
-    version: 2 as const,
-    alg: 'AES-GCM' as const,
+  const header: ChunkedEncryptionHeaderV2 = {
+    version: 2,
+    alg: 'AES-GCM',
     keySize: 256,
     chunkSize,
     chunkCount,
@@ -414,15 +401,7 @@ export const decryptDocumentChunked = async (
   const headerBytes = bytes.slice(4, 4 + headerLen);
   const headerJson = textDecoder.decode(headerBytes);
 
-  let header: {
-    version: number;
-    alg: string;
-    keySize: number;
-    chunkSize: number;
-    chunkCount: number;
-    metaHash: string;
-    totalSize: number;
-  };
+  let header: ChunkedEncryptionHeaderV2;
 
   try {
     header = JSON.parse(headerJson);
@@ -515,8 +494,7 @@ export const decryptDocumentChunked = async (
   const metaBytes = plaintext.slice(4, 4 + metaLen);
   const metaJson = textDecoder.decode(metaBytes);
 
-  const computedHashBuffer = await crypto.subtle.digest('SHA-256', textEncoder.encode(metaJson));
-  const computedHash = toHex(computedHashBuffer);
+  const computedHash = await computeMetadataHash(metaJson);
 
   if (computedHash !== header.metaHash) {
     throw new EncryptedBlobIntegrityError('Metadata hash does not match');

@@ -5,6 +5,7 @@ import userEvent from '@testing-library/user-event';
 import '@testing-library/jest-dom/vitest';
 import Dashboard from './Dashboard';
 import * as documentService from '../services/documentService';
+import type { DocumentLoadCacheEntry } from '../services/documentLoadCache';
 
 const saveModalProps: {
   onOk?: (values: { version: string; remark: string }) => void;
@@ -13,6 +14,7 @@ const saveModalProps: {
 
 const docStoreState = {
   currentFile: new File(['shared'], 'shared.docx', { type: 'application/vnd.openxmlformats-officedocument.wordprocessingml.document' }),
+  currentFileArrayBuffer: null as ArrayBuffer | null,
   setParsing: vi.fn(),
   setHeadings: vi.fn(),
   setCheckedKeys: vi.fn(),
@@ -24,6 +26,9 @@ const docStoreState = {
   setCurrentDocumentVersion: vi.fn(),
   initialCheckedKeys: null,
   setInitialCheckedKeys: vi.fn(),
+  setCurrentFileArrayBuffer: vi.fn((value: ArrayBuffer | null) => {
+    docStoreState.currentFileArrayBuffer = value;
+  }),
   documentMode: 'shared' as 'shared' | 'personal' | null,
   documentAccessRole: 'member' as 'owner' | 'member' | null,
   currentTeamScopedShare: true,
@@ -48,7 +53,14 @@ vi.mock('../store/useDocStore', () => ({
 }));
 
 vi.mock('../components/UploadZone', () => ({ default: () => <div>UploadZone</div> }));
-vi.mock('../components/DocumentPreview', () => ({ default: () => <div>DocumentPreview</div> }));
+const documentPreviewProps: { arrayBuffer?: ArrayBuffer | null } = {};
+
+vi.mock('../components/DocumentPreview', () => ({
+  default: (props: { arrayBuffer?: ArrayBuffer | null }) => {
+    documentPreviewProps.arrayBuffer = props.arrayBuffer;
+    return <div>DocumentPreview</div>;
+  },
+}));
 vi.mock('../components/TableOfContents', () => ({ default: () => <div>TableOfContents</div> }));
 vi.mock('../components/SaveDocumentModal', () => ({
   default: (props: {
@@ -72,12 +84,87 @@ vi.mock('../services/documentService', () => ({
   saveSharedDocumentVersion: vi.fn(),
   assertSharedVersionLabelAvailable: vi.fn(),
 }));
+const cacheState = {
+  entry: null as DocumentLoadCacheEntry | null,
+  get: vi.fn(() => cacheState.entry),
+  set: vi.fn(),
+  clear: vi.fn(),
+};
+
+vi.mock('../services/documentLoadCache', () => ({
+  createDocumentLoadCache: vi.fn(() => cacheState),
+}));
 vi.mock('../services/cryptoKeyService', () => ({ isWebCryptoAvailable: vi.fn(() => true) }));
 
 describe('Dashboard', () => {
+  it('保存过程中会透传 onProgress 并维护阶段状态，失败后清理保存状态', async () => {
+    const user = userEvent.setup();
+    teamStoreState.currentUserRole = 'editor';
+
+    // Mock saveSharedDocumentVersion to simulate onProgress being called then reject
+    vi.mocked(documentService.saveSharedDocumentVersion).mockImplementation(
+      async (input) => {
+        const onProgress = (input as { onProgress?: (info: unknown) => void }).onProgress;
+        onProgress?.({ stage: 'encrypting', percent: 30, message: '加密中...' });
+        throw new Error('网络错误');
+      },
+    );
+
+    render(<Dashboard />);
+
+    // Open modal and trigger save
+    await user.click(screen.getAllByRole('button', { name: /保\s*存/ })[0]);
+    await user.click(screen.getByRole('button', { name: '触发保存' }));
+
+    // After save fails, the save button should be re-enabled (not loading)
+    await waitFor(() => {
+      expect(documentService.saveSharedDocumentVersion).toHaveBeenCalled();
+    });
+
+    // Button should no longer be in loading state after failure
+    await waitFor(() => {
+      const saveBtn = screen.getAllByRole('button', { name: /保\s*存/ })[0];
+      expect(saveBtn).not.toHaveAttribute('aria-busy', 'true');
+    });
+  });
+
+  it('保存进行中会阻止重复提交，作为后续进度联动测试入口', async () => {
+    const user = userEvent.setup();
+    teamStoreState.currentUserRole = 'editor';
+
+    // Make save hang so we can observe the saving state
+    let resolveSave: ((value: unknown) => void) | undefined;
+    vi.mocked(documentService.saveSharedDocumentVersion).mockImplementation(
+      () => new Promise((resolve) => { resolveSave = resolve; }) as never,
+    );
+
+    render(<Dashboard />);
+
+    // Open modal and trigger save
+    await user.click(screen.getAllByRole('button', { name: /保\s*存/ })[0]);
+    await user.click(screen.getByRole('button', { name: '触发保存' }));
+
+    // Wait for the save to start (loading state applied)
+    await waitFor(() => {
+      expect(documentService.saveSharedDocumentVersion).toHaveBeenCalled();
+    });
+
+    // Verify the button shows loading via Ant Design's loading class
+    const saveBtn = screen.getAllByRole('button', { name: /保\s*存/ })[0];
+    expect(saveBtn.className).toContain('ant-btn-loading');
+
+    // Resolve the save to clean up
+    resolveSave?.({ documentId: 'doc-1' });
+
+    await waitFor(() => {
+      expect(saveBtn.className).not.toContain('ant-btn-loading');
+    });
+  });
+
   beforeEach(() => {
     vi.clearAllMocks();
     docStoreState.currentFile = new File(['shared'], 'shared.docx', { type: 'application/vnd.openxmlformats-officedocument.wordprocessingml.document' });
+    docStoreState.currentFileArrayBuffer = null;
     docStoreState.checkedKeys = ['k1', 'k2'];
     docStoreState.currentDocumentId = 'doc-1';
     docStoreState.currentDocumentVersion = 'V2.0.0';
@@ -88,9 +175,40 @@ describe('Dashboard', () => {
     teamStoreState.currentUserRole = 'reader';
     saveModalProps.onOk = undefined;
     saveModalProps.validateVersion = undefined;
+    documentPreviewProps.arrayBuffer = undefined;
+    cacheState.entry = null;
     vi.mocked(documentService.saveSharedDocumentVersion).mockResolvedValue({ documentId: 'doc-1' } as never);
     vi.mocked(documentService.savePersonalDocument).mockResolvedValue({ documentId: 'doc-1' } as never);
     vi.mocked(documentService.assertSharedVersionLabelAvailable).mockResolvedValue(undefined);
+  });
+
+  it('缓存命中时直接使用缓存的 headings 与 arrayBuffer，不再重新解析', async () => {
+    const cachedArrayBuffer = new ArrayBuffer(16);
+    const cachedFile = new File(['cached'], 'cached.docx', {
+      type: 'application/vnd.openxmlformats-officedocument.wordprocessingml.document',
+    });
+    const cachedHeadings = [
+      { id: 'heading-0', title: '缓存标题', level: 1, children: [], key: 'heading-0' },
+    ];
+    const { parseDocumentHeadings, getAllKeys } = await import('../utils/docParser');
+    vi.mocked(getAllKeys).mockReturnValue(['heading-0']);
+    cacheState.entry = {
+      file: cachedFile,
+      arrayBuffer: cachedArrayBuffer,
+      headings: cachedHeadings,
+      title: '缓存标题',
+    };
+
+    render(<Dashboard />);
+
+    await waitFor(() => {
+      expect(cacheState.get).toHaveBeenCalledWith('doc-1', 'V2.0.0');
+      expect(docStoreState.setHeadings).toHaveBeenCalledWith(cachedHeadings);
+      expect(docStoreState.setCheckedKeys).toHaveBeenCalledWith(['heading-0']);
+    });
+
+    expect(vi.mocked(parseDocumentHeadings)).not.toHaveBeenCalled();
+    expect(docStoreState.setCurrentFileArrayBuffer).toHaveBeenCalledWith(cachedArrayBuffer);
   });
 
   it('shows shared mode badge in the preview title', () => {
@@ -131,6 +249,7 @@ describe('Dashboard', () => {
         version: 'V2.1.0',
         remark: '共享保存',
         selectedKeys: ['k1', 'k2'],
+        onProgress: expect.any(Function),
       });
     });
     expect(documentService.savePersonalDocument).not.toHaveBeenCalled();
@@ -229,6 +348,7 @@ describe('Dashboard', () => {
         version: 'V2.1.0',
         remark: '共享保存',
         selectedKeys: ['k1', 'k2'],
+        onProgress: expect.any(Function),
       });
     });
     expect(documentService.saveSharedDocumentVersion).not.toHaveBeenCalled();

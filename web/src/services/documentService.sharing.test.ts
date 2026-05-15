@@ -81,10 +81,24 @@ const resetMocks = () => {
     blob: new Blob(['encrypted'], { type: 'application/octet-stream' }),
     contentHash: 'shared-hash',
   }));
+  vi.mocked(encryptionService.decryptDocumentChunked).mockImplementation(async () => ({
+    file: new File(['decrypted-content'], 'shared.docx', {
+      type: 'application/vnd.openxmlformats-officedocument.wordprocessingml.document',
+    }),
+    meta: { title: 'shared.docx', selectedKeys: ['k1', 'k2'] },
+  }));
   vi.mocked(documentEncryptionWorker.encryptDocumentChunkedViaWorker).mockImplementation(async () => ({
     blob: new Blob(['encrypted'], { type: 'application/octet-stream' }),
     contentHash: 'shared-hash',
   }));
+};
+
+const createDeferred = <T,>() => {
+  let resolve!: (value: T) => void;
+  const promise = new Promise<T>((res) => {
+    resolve = res;
+  });
+  return { promise, resolve };
 };
 
 describe('shareDocument', () => {
@@ -340,6 +354,117 @@ describe('unshareDocument', () => {
 });
 
 describe('current-team document list queries', () => {
+  it('loadSharedDocument 会并行发起 documents 与最新 version 查询', async () => {
+    const fromMock = supabase.from as unknown as MockFn;
+    const invokeMock = supabase.functions.invoke as unknown as MockFn;
+    const { loadSharedDocument } = await import('./documentService');
+    const documentDeferred = createDeferred<{ data: { path: string; metadata: { latestVersion: string; latestRemark: string } }; error: null }>();
+    const versionDeferred = createDeferred<{ data: { id: string; r2_key: string; content_hash: string; encrypted_meta: { title: string; selectedKeys: string[] }; version_label: string; note: string; key_version: number }; error: null }>();
+
+    let documentQueryStarted = false;
+    let versionQueryStarted = false;
+
+    fromMock.mockImplementation((table: string) => {
+      if (table === 'documents') {
+        return {
+          select: vi.fn().mockReturnValue({
+            eq: vi.fn().mockReturnValue({
+              single: vi.fn().mockImplementation(() => {
+                documentQueryStarted = true;
+                return documentDeferred.promise;
+              }),
+            }),
+          }),
+        };
+      }
+
+      if (table === 'document_versions') {
+        return {
+          select: vi.fn().mockReturnValue({
+            eq: vi.fn().mockReturnValue({
+              order: vi.fn().mockReturnValue({
+                limit: vi.fn().mockReturnValue({
+                  single: vi.fn().mockImplementation(() => {
+                    versionQueryStarted = true;
+                    return versionDeferred.promise;
+                  }),
+                }),
+              }),
+            }),
+          }),
+        };
+      }
+
+      if (table === 'document_keys') {
+        return {
+          select: vi.fn().mockReturnValue({
+            eq: vi.fn().mockReturnValue({
+              eq: vi.fn().mockReturnValue({
+                eq: vi.fn().mockReturnValue({
+                  limit: vi.fn().mockResolvedValue({
+                    data: [{ wrapped_document_key: 'wrapped-key-base64', key_version: 9 }],
+                    error: null,
+                  }),
+                }),
+              }),
+            }),
+          }),
+        };
+      }
+
+      return {};
+    });
+
+    invokeMock.mockResolvedValue({
+      data: { url: 'https://r2.example.com/get-url', method: 'GET', headers: {}, expiresAt: new Date(Date.now() + 300000).toISOString(), r2Key: 'hash.bin' },
+      error: null,
+    });
+
+    global.fetch = vi.fn().mockResolvedValue({
+      ok: true,
+      status: 200,
+      blob: async () => new Blob(['encrypted-content'], { type: 'application/octet-stream' }),
+    } as unknown as Response);
+
+    const loadPromise = loadSharedDocument('user-1', 'doc-shared');
+    await Promise.resolve();
+
+    expect(documentQueryStarted).toBe(true);
+    expect(versionQueryStarted).toBe(true);
+
+    documentDeferred.resolve({
+      data: {
+        path: 'pfm-trae/dev/documents/doc-shared/ver-001/hash.bin',
+        metadata: { latestVersion: 'V1.0.0', latestRemark: '共享版本' },
+      },
+      error: null,
+    });
+    versionDeferred.resolve({
+      data: {
+        id: 'ver-uuid-001',
+        r2_key: 'hash.bin',
+        content_hash: 'abc123',
+        encrypted_meta: { title: 'shared.docx', selectedKeys: ['k1', 'k2'] },
+        version_label: 'V1.0.0',
+        note: '共享版本',
+        key_version: 9,
+      },
+      error: null,
+    });
+
+    const result = await loadPromise;
+
+    expect(invokeMock).toHaveBeenCalledWith('r2-sign-download', expect.objectContaining({
+      body: expect.objectContaining({ documentId: 'doc-shared', versionId: 'ver-uuid-001' }),
+    }));
+    expect(vi.mocked(cryptoKeyService.unwrapDocumentKey)).toHaveBeenCalled();
+    expect(vi.mocked(encryptionService.decryptDocumentChunked)).toHaveBeenCalled();
+    expect(result.file).toBeInstanceOf(File);
+    expect(result.version).toBe('V1.0.0');
+    expect(result.remark).toBe('共享版本');
+    expect(result.selectedKeys).toEqual(['k1', 'k2']);
+  });
+
   it('Worker 适配层完全失败时，共享保存会正确传播异常（回退由适配层内部处理）', async () => {
     // Arrange: Worker adapter 完全失败（Worker + 主线程回退都失败）
     vi.mocked(documentEncryptionWorker.encryptDocumentChunkedViaWorker).mockRejectedValue(

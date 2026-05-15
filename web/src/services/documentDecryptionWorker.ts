@@ -78,71 +78,76 @@ export const decryptDocumentChunkedViaWorker = async (
     return decryptDocumentChunked(encrypted, key, fileNameFallback, mimeTypeFallback);
   }
 
-  // Worker created successfully - let any errors propagate naturally
-  return new Promise<DecryptDocumentResult>((resolve, reject) => {
-    const timeout = setTimeout(() => {
-      worker.terminate();
-      reject(new Error('Worker decryption timed out'));
-    }, 300_000); // 5 minute safety timeout
+  // Worker created successfully - wrap entire path with fallback
+  try {
+    return await new Promise<DecryptDocumentResult>((resolve, reject) => {
+      const timeout = setTimeout(() => {
+        worker.terminate();
+        reject(new Error('Worker decryption timed out'));
+      }, 300_000); // 5 minute safety timeout
 
-    worker.onmessage = (e: MessageEvent) => {
-      const msg = e.data as
-        | { type: 'progress'; chunkIndex: number; totalChunks: number }
-        | { type: 'success'; plaintext: ArrayBuffer }
-        | { type: 'error'; message: string };
+      worker.onmessage = (e: MessageEvent) => {
+        const msg = e.data as
+          | { type: 'progress'; chunkIndex: number; totalChunks: number }
+          | { type: 'success'; plaintext: ArrayBuffer }
+          | { type: 'error'; message: string };
 
-      if (msg.type === 'progress') {
-        options?.onProgress?.(msg.chunkIndex, msg.totalChunks);
-        return;
-      }
+        if (msg.type === 'progress') {
+          options?.onProgress?.(msg.chunkIndex, msg.totalChunks);
+          return;
+        }
 
-      if (msg.type === 'success') {
+        if (msg.type === 'success') {
+          clearTimeout(timeout);
+          worker.terminate();
+          // Parse plaintext to extract meta and construct File
+          parseWorkerPlaintext(msg.plaintext, fileNameFallback, mimeTypeFallback)
+            .then(resolve)
+            .catch(reject);
+          return;
+        }
+
+        if (msg.type === 'error') {
+          clearTimeout(timeout);
+          worker.terminate();
+          reject(new Error(msg.message));
+          return;
+        }
+      };
+
+      worker.onerror = (e) => {
         clearTimeout(timeout);
         worker.terminate();
-        // Parse plaintext to extract meta and construct File
-        parseWorkerPlaintext(msg.plaintext, fileNameFallback, mimeTypeFallback)
-          .then(resolve)
-          .catch(reject);
-        return;
-      }
+        reject(e.error ?? new Error(e.message ?? 'Worker decryption failed'));
+      };
 
-      if (msg.type === 'error') {
-        clearTimeout(timeout);
-        worker.terminate();
-        reject(new Error(msg.message));
-        return;
-      }
-    };
+      // Convert Blob to ArrayBuffer for transfer to Worker
+      const arrayBufferPromise = 'arrayBuffer' in encrypted
+        ? (encrypted as Blob & { arrayBuffer: () => Promise<ArrayBuffer> }).arrayBuffer()
+        : new Promise<ArrayBuffer>((resolve, reject) => {
+            const reader = new FileReader();
+            reader.onload = () => {
+              const result = reader.result;
+              if (result instanceof ArrayBuffer) resolve(result);
+              else reject(new Error('Unexpected FileReader result type'));
+            };
+            reader.onerror = () => reject(reader.error ?? new Error('Failed to read Blob'));
+            reader.readAsArrayBuffer(encrypted);
+          });
 
-    worker.onerror = (e) => {
-      clearTimeout(timeout);
-      worker.terminate();
-      reject(e.error ?? new Error(e.message ?? 'Worker decryption failed'));
-    };
-
-    // Convert Blob to ArrayBuffer for transfer to Worker
-    const arrayBufferPromise = 'arrayBuffer' in encrypted
-      ? (encrypted as Blob & { arrayBuffer: () => Promise<ArrayBuffer> }).arrayBuffer()
-      : new Promise<ArrayBuffer>((resolve, reject) => {
-          const reader = new FileReader();
-          reader.onload = () => {
-            const result = reader.result;
-            if (result instanceof ArrayBuffer) resolve(result);
-            else reject(new Error('Unexpected FileReader result type'));
-          };
-          reader.onerror = () => reject(reader.error ?? new Error('Failed to read Blob'));
-          reader.readAsArrayBuffer(encrypted);
+      arrayBufferPromise
+        .then((encryptedBuffer) => {
+          worker.postMessage({ type: 'decrypt', encrypted: encryptedBuffer, key }, [encryptedBuffer]);
+        })
+        .catch((err) => {
+          clearTimeout(timeout);
+          worker.terminate();
+          reject(err);
         });
-
-    arrayBufferPromise
-      .then((encryptedBuffer) => {
-        // Transfer the buffer to avoid copying multi-MB data
-        worker.postMessage({ type: 'decrypt', encrypted: encryptedBuffer, key }, [encryptedBuffer]);
-      })
-      .catch((err) => {
-        clearTimeout(timeout);
-        worker.terminate();
-        reject(err);
-      });
-  });
+    });
+  } catch (err) {
+    console.warn('[documentDecryptionWorker] Worker path failed, falling back to main-thread decryption:', err);
+    worker.terminate();
+    return decryptDocumentChunked(encrypted, key, fileNameFallback, mimeTypeFallback);
+  }
 };

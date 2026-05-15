@@ -36,25 +36,33 @@ const splitInside = (element: HTMLElement, remainingHeight: number): HTMLElement
 
   if (contentLimit < 20) return element; // 空间太小，整体移动
 
-  let currentHeight = 0;
-  
-  for (let i = 0; i < children.length; i++) {
-    const child = children[i];
+  // 批量读取所有子元素的布局测量值，避免循环中反复触发 layout reflow
+  const measurements = children.map(child => {
     const childStyle = window.getComputedStyle(child);
-    const childMarginTop = parseFloat(childStyle.marginTop) || 0;
-    const childMarginBottom = parseFloat(childStyle.marginBottom) || 0;
-    const childTotalHeight = child.offsetHeight + childMarginTop + childMarginBottom;
+    return {
+      el: child,
+      marginTop: parseFloat(childStyle.marginTop) || 0,
+      marginBottom: parseFloat(childStyle.marginBottom) || 0,
+      height: child.offsetHeight,
+    };
+  });
+
+  let currentHeight = 0;
+
+  for (let i = 0; i < measurements.length; i++) {
+    const m = measurements[i];
+    const childTotalHeight = m.height + m.marginTop + m.marginBottom;
 
     if (currentHeight + childTotalHeight > contentLimit) {
       // Overflow at child i
-      const spaceForChild = contentLimit - currentHeight - childMarginTop;
-      
+      const spaceForChild = contentLimit - currentHeight - m.marginTop;
+
       let remainingPart: HTMLElement | null = null;
       let moveWholeChild = true;
 
-      if (spaceForChild > 20) { 
-          const result = splitInside(child, spaceForChild);
-          if (result && result !== child) {
+      if (spaceForChild > 20) {
+          const result = splitInside(m.el, spaceForChild);
+          if (result && result !== m.el) {
              moveWholeChild = false;
              remainingPart = result;
           }
@@ -66,7 +74,7 @@ const splitInside = (element: HTMLElement, remainingHeight: number): HTMLElement
       if (moveWholeChild) {
          // 如果第一个子元素就放不下，说明整个 element 都放不下
          if (i === 0) return element;
-         
+
          // 移动 child 及后续兄弟
          for (let j = i; j < children.length; j++) {
              newContainer.appendChild(children[j]);
@@ -78,7 +86,7 @@ const splitInside = (element: HTMLElement, remainingHeight: number): HTMLElement
              newContainer.appendChild(children[j]);
          }
       }
-      
+
       return newContainer;
     }
     currentHeight += childTotalHeight;
@@ -126,12 +134,20 @@ const processPage = (page: HTMLElement, maxHeight: number) => {
     return /^目\s*录$/.test(t) || /^Table of Contents$/i.test(t) || /^Contents$/i.test(t) || /^目錄$/.test(t);
   };
 
-  let currentHeight = 0;
-  
-  for (let i = 0; i < contentChildren.length; i++) {
-    const child = contentChildren[i];
+  // 批量读取所有内容子元素的布局测量值，避免循环中反复触发 layout reflow
+  const measurements = contentChildren.map(child => {
     const childStyle = window.getComputedStyle(child);
-    const childHeight = child.offsetHeight + parseFloat(childStyle.marginTop) + parseFloat(childStyle.marginBottom);
+    return {
+      el: child,
+      height: child.offsetHeight + parseFloat(childStyle.marginTop) + parseFloat(childStyle.marginBottom),
+    };
+  });
+
+  let currentHeight = 0;
+
+  for (let i = 0; i < measurements.length; i++) {
+    const child = measurements[i].el;
+    const childHeight = measurements[i].height;
 
     // 新增：TOC 强制分页检测
     // 如果当前页面已经有内容 (currentHeight > 0 或 i > 0)，且遇到了 TOC 的开始，则强制分页
@@ -514,14 +530,21 @@ const repaginateFromScratch = (container: HTMLElement) => {
   updatePageNumbers(container);
 };
 
-const DocumentPreview: React.FC = () => {
-  const { currentFile, headings, checkedKeys } = useDocStore();
+interface DocumentPreviewProps {
+  arrayBuffer?: ArrayBuffer | null;
+  renderedHtml?: string | null;
+  onRendered?: (html: string) => void;
+}
+
+const DocumentPreview: React.FC<DocumentPreviewProps> = ({ arrayBuffer, renderedHtml, onRendered }) => {
+  const { currentFile, currentFileArrayBuffer, headings, checkedKeys } = useDocStore();
   const containerRef = useRef<HTMLDivElement>(null);
   const headingElementsRef = useRef<{ element: HTMLElement, heading: HeadingNode }[]>([]);
   const [loading, setLoading] = useState(false);
   const [isRendered, setIsRendered] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const styleMapperRef = useRef<StyleMapper | null>(null);
+  const updateVisibilityDebounceRef = useRef<ReturnType<typeof setTimeout> | null>(null);
 
   // 计算集合：自身勾选集合 + 标题可见集合（自身勾选或有勾选子孙）
   const checkedSet = React.useMemo(() => new Set<string>(checkedKeys), [checkedKeys]);
@@ -558,12 +581,33 @@ const DocumentPreview: React.FC = () => {
           containerRef.current.innerHTML = '';
         }
         headingElementsRef.current = []; // Reset mapping
-        
-        // Convert File to ArrayBuffer
-        const arrayBuffer = await currentFile.arrayBuffer();
+
+        // 二次打开快速路径：直接从缓存恢复已渲染的 DOM，跳过 renderAsync
+        if (renderedHtml && containerRef.current) {
+          console.log(`[DocumentPreview] 使用缓存的渲染 DOM 恢复`);
+          const tRestore = performance.now();
+          containerRef.current.innerHTML = renderedHtml;
+          if (!styleMapperRef.current) styleMapperRef.current = new StyleMapper();
+          styleMapperRef.current.applyGeneric(containerRef.current);
+          console.log(`[DocumentPreview] DOM 恢复完成, 耗时 ${(performance.now() - tRestore).toFixed(0)}ms`);
+          // 双重 rAF 确保浏览器完成布局后再标记渲染完成
+          requestAnimationFrame(() => {
+            if (active) {
+              requestAnimationFrame(() => {
+                if (active) {
+                  setIsRendered(true);
+                  setLoading(false);
+                }
+              });
+            }
+          });
+          return;
+        }
+
+        const renderArrayBuffer = arrayBuffer ?? currentFileArrayBuffer ?? await currentFile.arrayBuffer();
 
         if (!active) return;
-        
+
         // Render options
         const options = {
           className: 'docx', // 保持默认类名 'docx'，这样 wrapper 类名就是 'docx-wrapper'，页面类名是 'docx'
@@ -581,7 +625,9 @@ const DocumentPreview: React.FC = () => {
         };
 
         if (containerRef.current) {
-          await renderAsync(arrayBuffer, containerRef.current, undefined, options);
+          const tRender = performance.now();
+          await renderAsync(renderArrayBuffer, containerRef.current, undefined, options);
+          console.log(`[DocumentPreview] renderAsync 完成, 耗时 ${(performance.now() - tRender).toFixed(0)}ms`);
           
           if (active) {
             // 使用 requestAnimationFrame 确保 DOM 渲染完成
@@ -591,7 +637,16 @@ const DocumentPreview: React.FC = () => {
                 paginateDocument(containerRef.current!);
                 if (!styleMapperRef.current) styleMapperRef.current = new StyleMapper();
                 styleMapperRef.current.applyGeneric(containerRef.current!);
-                setIsRendered(true);
+                // 双重 rAF 确保浏览器在 DOM 变更后完成布局计算，再标记渲染完成
+                requestAnimationFrame(() => {
+                  if (active) {
+                    setIsRendered(true);
+                    // 回传渲染后的 DOM 快照供缓存
+                    if (onRendered && containerRef.current) {
+                      onRendered(containerRef.current.innerHTML);
+                    }
+                  }
+                });
               }
             });
           }
@@ -844,7 +899,9 @@ const DocumentPreview: React.FC = () => {
   // 3. 更新可见性和序号
   const updateVisibilityAndNumbering = () => {
     if (!containerRef.current) return;
-    
+
+    let visibilityChanged = false;
+
     // 序号计数器 (索引 1-6 对应 H1-H6)
     const counters = [0, 0, 0, 0, 0, 0, 0];
     
@@ -1033,12 +1090,20 @@ const DocumentPreview: React.FC = () => {
 
         }
         
-        el.style.display = isHeadingVisible ? '' : 'none';
+        const headingNewDisplay = isHeadingVisible ? '' : 'none';
+        if (el.style.display !== headingNewDisplay) {
+          visibilityChanged = true;
+        }
+        el.style.display = headingNewDisplay;
         // 同步对应章节内容的可见性
         const ownerSelector = `[data-section-owner="${headingNode.key}"]`;
         const owned = Array.from(containerRef.current.querySelectorAll(ownerSelector));
         owned.forEach((ownedEl: Element) => {
-          (ownedEl as HTMLElement).style.display = isSelfChecked ? '' : 'none';
+          const ownedNewDisplay = isSelfChecked ? '' : 'none';
+          if ((ownedEl as HTMLElement).style.display !== ownedNewDisplay) {
+            visibilityChanged = true;
+          }
+          (ownedEl as HTMLElement).style.display = ownedNewDisplay;
         });
 
         // 如果该标题被隐藏，压缩其后首个可见兄弟的顶部间距，避免大片留白
@@ -1064,8 +1129,14 @@ const DocumentPreview: React.FC = () => {
       const children = Array.from(page.children).filter(c => c !== header && c !== footer) as HTMLElement[];
       const visibleChildren = children.filter(c => getComputedStyle(c).display !== 'none');
       if (visibleChildren.length === 0) {
+        if (page.style.display !== 'none') {
+          visibilityChanged = true;
+        }
         page.style.display = 'none';
       } else {
+        if (page.style.display === 'none') {
+          visibilityChanged = true;
+        }
         page.style.display = '';
         const first = visibleChildren[0];
         // 仅对非首页执行顶部间距压缩，保留首页（封面）的原始布局
@@ -1079,16 +1150,20 @@ const DocumentPreview: React.FC = () => {
             const sub = Array.from(elc.children) as HTMLElement[];
             const visibleSub = sub.filter(s => getComputedStyle(s).display !== 'none');
             if (visibleSub.length === 0 && (elc.textContent || '').trim() === '') {
+              if (elc.style.display !== 'none') {
+                visibilityChanged = true;
+              }
               elc.style.display = 'none';
             }
           }
         });
       }
     });
-    // 先尝试直接回填，若仍有明显空白可继续使用完全重排
-    fillGaps(containerRef.current);
-    // 全量重排，确保中间页空白被彻底压缩
-    repaginateFromScratch(containerRef.current);
+    // 仅在可见性实际发生变化时才执行回填和重排，避免初始加载时的无用开销
+    if (visibilityChanged) {
+      fillGaps(containerRef.current);
+      repaginateFromScratch(containerRef.current);
+    }
   };
 
   // 依据标题映射结果，为后续兄弟元素标记归属章节 key
@@ -1153,19 +1228,24 @@ const DocumentPreview: React.FC = () => {
   useEffect(() => {
     if (isRendered && headings.length > 0) {
       mapDomToHeadings();
-      
-      // 双重保险：稍微延迟后再映射一次，防止首次渲染 DOM 不稳定或字体加载导致的布局偏移
-      const timer = setTimeout(() => {
-        mapDomToHeadings();
-      }, 500);
-      
-      return () => clearTimeout(timer);
+      // DOM 稳定性已由 render effect 中的双重 rAF 保证，无需延迟重复调用
     }
   }, [isRendered, headings]);
 
-  // 当勾选状态改变时，更新可见性
+  // 当勾选状态改变时，防抖更新可见性，避免快速切换 checkbox 时重复触发完整级联
   useEffect(() => {
-    updateVisibilityAndNumbering();
+    if (updateVisibilityDebounceRef.current) {
+      clearTimeout(updateVisibilityDebounceRef.current);
+    }
+    updateVisibilityDebounceRef.current = setTimeout(() => {
+      updateVisibilityAndNumbering();
+      updateVisibilityDebounceRef.current = null;
+    }, 50);
+    return () => {
+      if (updateVisibilityDebounceRef.current) {
+        clearTimeout(updateVisibilityDebounceRef.current);
+      }
+    };
   }, [checkedKeys]);
 
   // 监听滚动事件 (保持原有逻辑)

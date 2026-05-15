@@ -15,12 +15,15 @@ import {
 } from '../services/documentService';
 import { isWebCryptoAvailable } from '../services/cryptoKeyService';
 import { useTeamStore } from '../store/useTeamStore';
+import type { SaveProgressInfo } from '../services/documentSaveProgress';
+import { createDocumentLoadCache } from '../services/documentLoadCache';
 
 const Dashboard: React.FC = () => {
   const { user } = useAuthStore();
   const { currentTeamId, currentUserRole } = useTeamStore();
   const {
     currentFile,
+    currentFileArrayBuffer,
     setParsing,
     setHeadings,
     setCheckedKeys,
@@ -32,11 +35,23 @@ const Dashboard: React.FC = () => {
     setCurrentDocumentVersion,
     initialCheckedKeys,
     setInitialCheckedKeys,
+    setCurrentFileArrayBuffer,
     documentMode,
     currentTeamScopedShare,
   } = useDocStore();
   const [exporting, setExporting] = React.useState(false);
   const [saving, setSaving] = React.useState(false);
+  const [saveProgress, setSaveProgress] = React.useState<SaveProgressInfo | null>(null);
+  const documentLoadCacheRef = React.useRef(createDocumentLoadCache());
+  const renderedHtmlForPreview = React.useMemo(() => {
+    if (currentDocumentId && currentDocumentVersion && currentFile) {
+      const cached = documentLoadCacheRef.current.get(currentDocumentId, currentDocumentVersion);
+      if (cached && cached.file.size === currentFile.size && cached.renderedHtml) {
+        return cached.renderedHtml;
+      }
+    }
+    return null;
+  }, [currentDocumentId, currentDocumentVersion, currentFile]);
   const webCryptoAvailable = isWebCryptoAvailable();
   const [saveModalOpen, setSaveModalOpen] = React.useState(false);
   const saveDisabledByRole = documentMode === 'shared' && currentUserRole === 'reader';
@@ -52,23 +67,67 @@ const Dashboard: React.FC = () => {
     if (!currentFile) {
       setHeadings([]);
       setCheckedKeys([]);
+      setCurrentFileArrayBuffer(null);
       return;
     }
+
+    const applyCheckedKeys = (allKeys: string[]) => {
+      if (initialCheckedKeys && initialCheckedKeys.length > 0) {
+        const nextKeys = initialCheckedKeys.filter((key) =>
+          allKeys.includes(key),
+        );
+        setCheckedKeys(nextKeys);
+        setInitialCheckedKeys(null);
+        return;
+      }
+
+      setCheckedKeys(allKeys);
+    };
+
+    // 捕获闭包值，避免异步执行时引用过期的 store 状态
+    const docId = currentDocumentId;
+    const docVersion = currentDocumentVersion;
 
     const parse = async () => {
       try {
         setParsing(true);
+
+        if (docId && docVersion) {
+          const cached = documentLoadCacheRef.current.get(docId, docVersion);
+          // 校验文件大小防止缓存内容与实际文件不一致
+          if (cached && cached.file.size === currentFile.size) {
+            console.log(`[Dashboard] 内存缓存命中, 跳过 ArrayBuffer 读取和目录解析`);
+            setHeadings(cached.headings as HeadingNode[]);
+            applyCheckedKeys(getAllKeys(cached.headings as HeadingNode[]));
+            setCurrentFileArrayBuffer(cached.arrayBuffer ?? null);
+            return;
+          }
+        }
+
+        const tAB = performance.now();
+        const nextArrayBuffer =
+          currentFileArrayBuffer ??
+          (typeof currentFile.arrayBuffer === 'function'
+            ? await currentFile.arrayBuffer()
+            : null);
+        if (nextArrayBuffer) {
+          setCurrentFileArrayBuffer(nextArrayBuffer);
+        }
+        console.log(`[Dashboard] ArrayBuffer 读取完成, 耗时 ${(performance.now() - tAB).toFixed(0)}ms`);
+        const tParse = performance.now();
         const root = await parseDocumentHeadings(currentFile);
+        console.log(`[Dashboard] 目录解析完成, 耗时 ${(performance.now() - tParse).toFixed(0)}ms`);
         setHeadings(root);
-        const allKeys = getAllKeys(root);
-        if (initialCheckedKeys && initialCheckedKeys.length > 0) {
-          const nextKeys = initialCheckedKeys.filter((key) =>
-            allKeys.includes(key),
-          );
-          setCheckedKeys(nextKeys);
-          setInitialCheckedKeys(null);
-        } else {
-          setCheckedKeys(allKeys);
+        applyCheckedKeys(getAllKeys(root));
+
+        // 写入缓存，后续二次打开可跳过解密和目录解析
+        if (docId && docVersion) {
+          documentLoadCacheRef.current.set(docId, docVersion, {
+            file: currentFile,
+            arrayBuffer: nextArrayBuffer ?? undefined,
+            headings: root,
+            title: root?.length > 0 ? root[0].title : currentFile.name,
+          });
         }
       } catch (error) {
         console.error(error);
@@ -79,9 +138,8 @@ const Dashboard: React.FC = () => {
     };
 
     parse();
-    // initialCheckedKeys 不加入依赖：它在 setFile 之前已写入 store，
-    // effect 读到的总是最新值；若加入依赖，setInitialCheckedKeys(null)
-    // 会再次触发 effect，导致 checkedKeys 被 allKeys 覆盖。
+    // initialCheckedKeys / currentDocumentId / currentDocumentVersion / currentFileArrayBuffer 不加入依赖：
+    // effect 只应在 currentFile 切换时运行一次，避免 store 内部收尾写入再次触发解析。
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [currentFile]);
 
@@ -130,6 +188,7 @@ const Dashboard: React.FC = () => {
 
     try {
       setSaving(true);
+      setSaveProgress({ stage: 'preparing', percent: 0, message: '准备中...' });
       const selectedKeys = checkedKeys as string[];
       const blob: Blob = currentFile;
 
@@ -144,6 +203,7 @@ const Dashboard: React.FC = () => {
           version: values.version,
           remark: values.remark,
           selectedKeys,
+          onProgress: (info) => setSaveProgress(info),
         });
 
         setCurrentDocumentId(result.documentId);
@@ -151,6 +211,7 @@ const Dashboard: React.FC = () => {
         setSaveModalOpen(false);
         window.dispatchEvent(new Event('sharedDocumentsChanged'));
         message.success('保存成功');
+        setSaveProgress(null);
         return;
       }
 
@@ -163,6 +224,7 @@ const Dashboard: React.FC = () => {
         version: values.version,
         remark: values.remark,
         selectedKeys,
+        onProgress: (info) => setSaveProgress(info),
       });
 
       setCurrentDocumentId(result.documentId);
@@ -170,10 +232,12 @@ const Dashboard: React.FC = () => {
       setSaveModalOpen(false);
       window.dispatchEvent(new Event('personalDocumentsChanged'));
       message.success('保存成功');
+      setSaveProgress(null);
     } catch (error) {
       console.error('Save failed:', error);
       const errorMessage = error instanceof Error && error.message ? error.message : '保存失败，请重试';
       message.error(errorMessage);
+      setSaveProgress(null);
     } finally {
       setSaving(false);
     }
@@ -290,6 +354,15 @@ const Dashboard: React.FC = () => {
                   loading={saving}
                   disabled={saveDisabled}
                   onClick={handleOpenSaveModal}
+                  icon={
+                    <span role="img" aria-label="save" className="anticon">
+                      <svg width="1em" height="1em" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.5" strokeLinecap="round" strokeLinejoin="round">
+                        <path d="M19 21H5a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h11l5 5v11a2 2 0 0 1-2 2z"/>
+                        <polyline points="17 21 17 13 7 13 7 21"/>
+                        <polyline points="7 3 7 8 15 8"/>
+                      </svg>
+                    </span>
+                  }
                 >
                   保存
                 </Button>
@@ -315,11 +388,30 @@ const Dashboard: React.FC = () => {
           ) : null
         }
       >
-        <DocumentPreview />
+        <DocumentPreview
+          arrayBuffer={currentFileArrayBuffer}
+          renderedHtml={renderedHtmlForPreview}
+          onRendered={(html) => {
+            // 缓存渲染后的 DOM 快照，供二次打开时跳过 renderAsync
+            const docId = currentDocumentId;
+            const docVersion = currentDocumentVersion;
+            if (docId && docVersion && currentFile) {
+              const existing = documentLoadCacheRef.current.get(docId, docVersion);
+              if (existing) {
+                documentLoadCacheRef.current.set(docId, docVersion, {
+                  ...existing,
+                  renderedHtml: html,
+                });
+              }
+            }
+          }}
+        />
       </Card>
       <SaveDocumentModal
         open={saveModalOpen}
         confirmLoading={saving}
+        saving={saving}
+        saveProgress={saveProgress}
         onOk={handleSaveConfirm}
         onCancel={handleCloseSaveModal}
         defaultVersion={currentDocumentVersion}

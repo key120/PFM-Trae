@@ -156,9 +156,9 @@ const SharedDocumentList: React.FC<SharedDocumentListProps> = ({ open, onLoaded 
     } else {
       setInitialCheckedKeys(null);
     }
-    setFile(result.file);
     setCurrentDocumentId(item.id);
     setCurrentDocumentVersion(result.version ?? null);
+    setFile(result.file);
     setDocumentMode('shared');
     setDocumentAccessRole(item.isOwner ? 'owner' : 'member');
     setCurrentTeamScopedShare(true);
@@ -190,7 +190,16 @@ const SharedDocumentList: React.FC<SharedDocumentListProps> = ({ open, onLoaded 
   }
 
   if (!Array.isArray(documents) || documents.length === 0) {
-    return <Empty description="暂无共享文档" />;
+    return (
+      <Empty
+        image={Empty.PRESENTED_IMAGE_SIMPLE}
+        description="暂无共享文档"
+      >
+        <Typography.Text type="secondary" style={{ fontSize: '13px' }}>
+          团队成员共享文档后，将在此显示
+        </Typography.Text>
+      </Empty>
+    );
   }
 
   return (

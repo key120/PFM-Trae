@@ -3,6 +3,7 @@ import type { HeadingNode } from '../utils/docParser';
 
 interface DocState {
   currentFile: File | null;
+  currentFileArrayBuffer: ArrayBuffer | null;
   isUploading: boolean;
   isParsing: boolean;
   headings: HeadingNode[];
@@ -15,6 +16,7 @@ interface DocState {
   currentTeamScopedShare: boolean;
 
   setFile: (file: File | null) => void;
+  setCurrentFileArrayBuffer: (arrayBuffer: ArrayBuffer | null) => void;
   startNewUpload: (file: File) => void;
   setUploading: (status: boolean) => void;
   setParsing: (status: boolean) => void;
@@ -31,6 +33,7 @@ interface DocState {
 
 export const useDocStore = create<DocState>((set) => ({
   currentFile: null,
+  currentFileArrayBuffer: null,
   isUploading: false,
   isParsing: false,
   headings: [],
@@ -42,10 +45,12 @@ export const useDocStore = create<DocState>((set) => ({
   documentAccessRole: null,
   currentTeamScopedShare: false,
 
-  setFile: (file) => set({ currentFile: file }),
+  setFile: (file) => set({ currentFile: file, currentFileArrayBuffer: null }),
+  setCurrentFileArrayBuffer: (arrayBuffer) => set({ currentFileArrayBuffer: arrayBuffer }),
   startNewUpload: (file) =>
     set({
       currentFile: file,
+      currentFileArrayBuffer: null,
       headings: [],
       checkedKeys: [],
       currentDocumentId: null,
@@ -68,6 +73,7 @@ export const useDocStore = create<DocState>((set) => ({
   reset: () =>
     set({
       currentFile: null,
+      currentFileArrayBuffer: null,
       isUploading: false,
       isParsing: false,
       headings: [],

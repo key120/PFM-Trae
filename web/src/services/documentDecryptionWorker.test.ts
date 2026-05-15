@@ -227,7 +227,7 @@ describe('documentDecryptionWorker 适配层集成测试', () => {
     expect(result.meta).toEqual(meta);
   });
 
-  it('Worker 抛错时通过 reject 传播错误', async () => {
+  it('Worker 抛错时回退到主线程解密', async () => {
     // Mock Worker that always fails via onerror
     class FailingWorker {
       onmessage: ((e: MessageEvent) => void) | null = null;
@@ -259,18 +259,19 @@ describe('documentDecryptionWorker 适配层集成测试', () => {
       { chunkSize: 16 },
     );
 
-    // Worker errors now reject directly (no fallback) after try/catch restructure
-    await expect(
-      decryptDocumentChunkedViaWorker(
-        blob,
-        key,
-        'fallback.docx',
-        'application/vnd.openxmlformats-officedocument.wordprocessingml.document',
-      ),
-    ).rejects.toThrow('Worker init failed');
+    // Worker errors now fall back to main-thread decryption
+    const result = await decryptDocumentChunkedViaWorker(
+      blob,
+      key,
+      'fallback.docx',
+      'application/vnd.openxmlformats-officedocument.wordprocessingml.document',
+    );
+    expect(result.file).toBeInstanceOf(File);
+    expect(await readFileText(result.file)).toBe(content);
+    expect(result.meta).toEqual(meta);
   });
 
-  it('Worker onmessage 返回 error 时通过 reject 传播错误', async () => {
+  it('Worker onmessage 返回 error 时回退到主线程解密', async () => {
     class ErrorMessageWorker {
       onmessage: ((e: MessageEvent) => void) | null = null;
       onerror: ((e: ErrorEvent) => void) | null = null;
@@ -295,10 +296,10 @@ describe('documentDecryptionWorker 适配层集成测试', () => {
     const file = new File(['data'], 'err.docx', { type: 'application/octet-stream' });
     const { blob } = await encryptDocumentChunked({ file, key });
 
-    // Worker error messages now reject directly (no fallback)
-    await expect(
-      decryptDocumentChunkedViaWorker(blob, key, 'err.docx'),
-    ).rejects.toThrow('Decryption failed in worker');
+    // Worker error messages now fall back to main-thread decryption
+    const result = await decryptDocumentChunkedViaWorker(blob, key, 'err.docx');
+    expect(result.file).toBeInstanceOf(File);
+    expect(result.file.name).toBe('err.docx');
   });
 
   it('Worker 解密与主线程解密结果一致', async () => {

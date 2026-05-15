@@ -409,9 +409,9 @@ const PersonalDocumentList: React.FC<PersonalDocumentListProps> = ({ open, loade
       } else {
         setInitialCheckedKeys(null);
       }
-      setFile(result.file);
       setCurrentDocumentId(item.id);
       setCurrentDocumentVersion(result.version);
+      setFile(result.file);
       setDocumentMode('personal');
       setDocumentAccessRole('owner');
       setCurrentTeamScopedShare(false);
@@ -485,7 +485,16 @@ const PersonalDocumentList: React.FC<PersonalDocumentListProps> = ({ open, loade
   }
 
   if (!Array.isArray(documents) || documents.length === 0) {
-    return <Empty description="暂无个人文档" />;
+    return (
+      <Empty
+        image={Empty.PRESENTED_IMAGE_SIMPLE}
+        description="暂无个人文档"
+      >
+        <Typography.Text type="secondary" style={{ fontSize: '13px' }}>
+          上传 DOCX 文档后，保存即可在此查看
+        </Typography.Text>
+      </Empty>
+    );
   }
 
   return (

@@ -70,27 +70,30 @@ const Register: React.FC = () => {
         >
           <Form.Item
             name="email"
+            label="邮箱"
             rules={[
               { type: 'email', message: '请输入有效的邮箱地址!' },
               { required: true, message: '请输入您的邮箱!' },
             ]}
           >
-            <Input prefix={<UserOutlined />} placeholder="邮箱" style={{ fontSize: '14px' }} />
+            <Input prefix={<UserOutlined />} placeholder="请输入邮箱" style={{ fontSize: '14px' }} />
           </Form.Item>
 
           <Form.Item
             name="password"
+            label="密码"
             rules={[
               { required: true, message: '请输入您的密码!' },
               { min: 8, message: '密码至少需要8位' }
             ]}
             hasFeedback
           >
-            <Input.Password prefix={<LockOutlined />} placeholder="密码" style={{ fontSize: '14px' }} />
+            <Input.Password prefix={<LockOutlined />} placeholder="请输入密码（至少8位）" style={{ fontSize: '14px' }} />
           </Form.Item>
 
           <Form.Item
             name="confirm"
+            label="确认密码"
             dependencies={['password']}
             hasFeedback
             rules={[
@@ -105,7 +108,7 @@ const Register: React.FC = () => {
               }),
             ]}
           >
-            <Input.Password prefix={<LockOutlined />} placeholder="确认密码" style={{ fontSize: '14px' }} />
+            <Input.Password prefix={<LockOutlined />} placeholder="请再次输入密码" style={{ fontSize: '14px' }} />
           </Form.Item>
 
           <Form.Item>

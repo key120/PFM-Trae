@@ -1,5 +1,6 @@
 import React, { useEffect } from 'react';
-import { Modal, Form, Input } from 'antd';
+import { Modal, Form, Input, Progress } from 'antd';
+import type { SaveProgressInfo } from '../services/documentSaveProgress';
 
 interface SaveDocumentModalProps {
   open: boolean;
@@ -8,6 +9,8 @@ interface SaveDocumentModalProps {
   onCancel: () => void;
   defaultVersion?: string | null;
   validateVersion?: (version: string) => Promise<void>;
+  saving?: boolean;
+  saveProgress?: SaveProgressInfo | null;
 }
 
 const SaveDocumentModal: React.FC<SaveDocumentModalProps> = ({
@@ -17,6 +20,8 @@ const SaveDocumentModal: React.FC<SaveDocumentModalProps> = ({
   onCancel,
   defaultVersion,
   validateVersion,
+  saving = false,
+  saveProgress = null,
 }) => {
   const [form] = Form.useForm<{ version: string; remark: string }>();
 
@@ -38,15 +43,19 @@ const SaveDocumentModal: React.FC<SaveDocumentModalProps> = ({
     <Modal
       open={open}
       title="保存文档"
-      maskClosable
+      maskClosable={!saving}
+      keyboard={!saving}
+      closable={!saving}
       destroyOnHidden={false}
       centered
       style={{ ['--ant-modal-content-padding' as string]: '16px 20px' }}
       confirmLoading={confirmLoading}
       onOk={handleOk}
-      onCancel={onCancel}
+      onCancel={saving ? undefined : onCancel}
       okText="保存"
       cancelText="取消"
+      okButtonProps={saving ? { disabled: true } : undefined}
+      cancelButtonProps={saving ? { disabled: true } : undefined}
     >
       <Form form={form} layout="vertical">
         <Form.Item
@@ -73,6 +82,16 @@ const SaveDocumentModal: React.FC<SaveDocumentModalProps> = ({
           />
         </Form.Item>
       </Form>
+      {saving && saveProgress && (
+        <div style={{ marginTop: 8 }}>
+          <Progress percent={saveProgress.percent} status="active" />
+          {saveProgress.message && (
+            <div style={{ textAlign: 'center', marginTop: 8, color: '#666' }}>
+              {saveProgress.message}
+            </div>
+          )}
+        </div>
+      )}
     </Modal>
   );
 };

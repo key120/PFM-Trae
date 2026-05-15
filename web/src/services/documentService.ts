@@ -1,5 +1,6 @@
 import { supabase } from '../lib/supabase';
-import { decryptDocumentChunked } from './encryptionService';
+import { decryptDocumentChunkedViaWorker } from './documentDecryptionWorker';
+import { getCachedEncryptedBlob, cacheEncryptedBlob } from './documentBlobCache';
 import { encryptDocumentChunkedViaWorker } from './documentEncryptionWorker';
 import {
   generateDocumentKey,
@@ -526,13 +527,27 @@ export async function loadPersonalDocument(
   userId: string,
   documentId: string,
 ): Promise<LoadedPersonalDocument> {
-  // Step 1：读取文档元数据
-  const { data, error } = await supabase
+  const documentQuery = supabase
     .from('documents')
     .select('path, metadata')
     .eq('id', documentId)
     .eq('owner_id', userId)
     .single();
+
+  const latestVersionQuery = supabase
+    .from('document_versions')
+    .select('id, r2_key, content_hash, encrypted_meta, version_label, note, key_version')
+    .eq('document_id', documentId)
+    .order('created_at', { ascending: false })
+    .limit(1)
+    .single();
+
+  const [documentResult, latestVersionResult] = await Promise.all([
+    documentQuery,
+    latestVersionQuery,
+  ]);
+
+  const { data, error } = documentResult;
 
   if (error || !data) {
     throw error || new Error('Failed to load document metadata');
@@ -547,14 +562,7 @@ export async function loadPersonalDocument(
       throw new Error('当前浏览器不支持 Web Crypto API，无法解密文档');
     }
 
-    // 获取最新版本记录（取 created_at 最新的一条）
-    const { data: versionData, error: versionError } = await supabase
-      .from('document_versions')
-      .select('id, r2_key, content_hash, encrypted_meta, version_label, note, key_version')
-      .eq('document_id', documentId)
-      .order('created_at', { ascending: false })
-      .limit(1)
-      .single();
+    const { data: versionData, error: versionError } = latestVersionResult;
 
     if (versionError || !versionData) {
       throw versionError || new Error('Failed to load document version');
@@ -647,19 +655,30 @@ export async function loadPersonalDocument(
       throw createKeyNotReadyError('解密密钥不可用，请重新初始化密钥后重试');
     }
 
-    // 从 R2 下载密文 Blob
-    const encryptedBlob = await downloadFromR2(documentId, versionData.id as string);
+    // 优先从 IndexedDB 缓存读取密文，未命中再从 R2 下载
+    const versionIdStr = versionData.id as string;
+    const tDownload = performance.now();
+    let encryptedBlob = await getCachedEncryptedBlob(documentId, versionIdStr);
+    if (encryptedBlob) {
+      console.log(`[loadDoc] IndexedDB 缓存命中, 耗时 ${(performance.now() - tDownload).toFixed(0)}ms`);
+    } else {
+      encryptedBlob = await downloadFromR2(documentId, versionIdStr);
+      cacheEncryptedBlob(documentId, versionIdStr, encryptedBlob);
+      console.log(`[loadDoc] R2 下载完成, 耗时 ${(performance.now() - tDownload).toFixed(0)}ms, 大小 ${(encryptedBlob.size / 1024 / 1024).toFixed(1)}MB`);
+    }
 
     // 解密
     const encMeta = (versionData.encrypted_meta as { title?: string; selectedKeys?: string[] } | null) ?? null;
     const fileName = encMeta?.title || '未命名文档';
 
-    const { file, meta } = await decryptDocumentChunked(
+    const tDecrypt = performance.now();
+    const { file, meta } = await decryptDocumentChunkedViaWorker(
       encryptedBlob,
       documentKey,
       fileName,
       'application/vnd.openxmlformats-officedocument.wordprocessingml.document',
     );
+    console.log(`[loadDoc] 解密完成, 耗时 ${(performance.now() - tDecrypt).toFixed(0)}ms`);
 
     // 元数据优先从加密内容中的 meta 恢复，其次 encrypted_meta，最后 documents.metadata
     const selectedKeys =
@@ -1282,11 +1301,26 @@ export async function loadSharedDocument(
   userId: string,
   documentId: string,
 ): Promise<LoadedPersonalDocument> {
-  const { data, error } = await supabase
+  const documentQuery = supabase
     .from('documents')
     .select('path, metadata')
     .eq('id', documentId)
     .single();
+
+  const latestVersionQuery = supabase
+    .from('document_versions')
+    .select('id, r2_key, content_hash, encrypted_meta, version_label, note, key_version')
+    .eq('document_id', documentId)
+    .order('created_at', { ascending: false })
+    .limit(1)
+    .single();
+
+  const [documentResult, latestVersionResult] = await Promise.all([
+    documentQuery,
+    latestVersionQuery,
+  ]);
+
+  const { data, error } = documentResult;
 
   if (error || !data) {
     throw error || new Error('无法加载共享文档信息');
@@ -1294,13 +1328,7 @@ export async function loadSharedDocument(
 
   const metadata = (data.metadata as DocumentMetadata | null) ?? null;
 
-  const { data: versionData, error: versionError } = await supabase
-    .from('document_versions')
-    .select('id, r2_key, content_hash, encrypted_meta, version_label, note, key_version')
-    .eq('document_id', documentId)
-    .order('created_at', { ascending: false })
-    .limit(1)
-    .single();
+  const { data: versionData, error: versionError } = latestVersionResult;
 
   if (versionError || !versionData) {
     throw versionError || new Error('无法加载文档版本');
@@ -1374,12 +1402,18 @@ export async function loadSharedDocument(
     throw new Error('解密密钥不可用，无法解密该共享文档');
   }
 
-  const encryptedBlob = await downloadFromR2(documentId, versionData.id as string);
+  // 优先从 IndexedDB 缓存读取密文，未命中再从 R2 下载
+  const versionIdStr = versionData.id as string;
+  let encryptedBlob = await getCachedEncryptedBlob(documentId, versionIdStr);
+  if (!encryptedBlob) {
+    encryptedBlob = await downloadFromR2(documentId, versionIdStr);
+    cacheEncryptedBlob(documentId, versionIdStr, encryptedBlob);
+  }
 
   const encMeta = (versionData.encrypted_meta as { title?: string; selectedKeys?: string[] } | null) ?? null;
   const fileName = encMeta?.title || '未命名文档';
 
-  const { file, meta } = await decryptDocumentChunked(
+  const { file, meta } = await decryptDocumentChunkedViaWorker(
     encryptedBlob,
     documentKey,
     fileName,
