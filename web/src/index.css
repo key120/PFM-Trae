@@ -36,3 +36,41 @@ body {
 .docx-container {
   padding: 0 !important;
 }
+
+/* Tree checkbox fallback: ensure checkbox-inner has correct dimensions
+   even if CSS-in-JS styles haven't been injected yet.
+   Only overrides base layout; ::after positioning is handled by CSS-in-JS
+   to avoid conflicts between physical (left) and logical (inset-inline-start) properties. */
+.ant-tree .ant-tree-checkbox-inner {
+  display: block !important;
+  width: 16px !important;
+  height: 16px !important;
+  box-sizing: border-box !important;
+  background-color: #fff !important;
+  border: 1px solid #d9d9d9 !important;
+  border-radius: 4px !important;
+  position: relative !important;
+  transition: none !important;
+}
+
+/* ::after 也必须禁用过渡，否则 checked↔indeterminate 切换时
+   背景色瞬间变化但 ::after（对勾/蓝方块）还在做动画插值，
+   产生可见的中间态（半边蓝方块、无对勾纯蓝填充等） */
+.ant-tree .ant-tree-checkbox-inner::after {
+  transition: none !important;
+}
+
+.ant-tree .ant-tree-checkbox-checked .ant-tree-checkbox-inner {
+  background-color: #1677ff !important;
+  border-color: #1677ff !important;
+}
+
+.ant-tree .ant-tree-checkbox-indeterminate .ant-tree-checkbox-inner {
+  background-color: #fff !important;
+  border-color: #d9d9d9 !important;
+}
+
+/* CSS-in-JS omits border-radius for indeterminate ::after; supply it here */
+.ant-tree .ant-tree-checkbox-indeterminate .ant-tree-checkbox-inner::after {
+  border-radius: 2px !important;
+}

@@ -25,43 +25,62 @@ export const calculateNumbering = (headings: HeadingNode[], checkedKeys: string[
   const counters = [0, 0, 0, 0, 0, 0, 0]; // Index 1-6 for H1-H6
   const checkedSet = new Set<string>(checkedKeys);
 
-  // 父标题即使半选（自身未勾选但有勾选后代），也应保留显示序号
-  const isEffectiveChecked = (node: HeadingNode): boolean => {
-    if (checkedSet.has(node.key)) return true;
-    return (node.children || []).some(isEffectiveChecked);
+  // 单次遍历预计算：哪些节点自身已勾选，哪些节点有已勾选后代
+  const selfChecked = new Set<string>();
+  const hasCheckedDescendant = new Set<string>();
+
+  const precompute = (nodes: HeadingNode[]): boolean => {
+    let found = false;
+    for (const node of nodes) {
+      if (checkedSet.has(node.key)) {
+        selfChecked.add(node.key);
+        found = true;
+      }
+      if (node.children && node.children.length > 0) {
+        if (precompute(node.children)) {
+          hasCheckedDescendant.add(node.key);
+          found = true;
+        }
+      }
+    }
+    return found;
   };
+
+  precompute(headings);
+
+  const isEffectiveChecked = (key: string): boolean =>
+    selfChecked.has(key) || hasCheckedDescendant.has(key);
 
   const traverse = (nodes: HeadingNode[]) => {
     nodes.forEach((node) => {
-      const shouldShow = isEffectiveChecked(node);
-      if (shouldShow) {
-        const level = node.level;
-        const title = node.title.trim();
-        const isTOC = /^目\s*录$/.test(title);
-        const chineseMatch = title.match(/^第\s*([0-9]+|[零一二三四五六七八九十百千]+)\s*章/);
+      if (!isEffectiveChecked(node.key)) return;
 
-        if (level >= 1 && level <= 6 && !isTOC) {
-          counters[level]++;
-          for (let i = level + 1; i <= 6; i++) counters[i] = 0;
+      const level = node.level;
+      const title = node.title.trim();
+      const isTOC = /^目\s*录$/.test(title);
+      const chineseMatch = title.match(/^第\s*([0-9]+|[零一二三四五六七八九十百千]+)\s*章/);
 
-          if (chineseMatch) {
-            const originalNumStr = chineseMatch[1];
-            const isArabic = /^[0-9]+$/.test(originalNumStr);
-            const currentCount = counters[level];
-            const newNumStr = isArabic ? currentCount.toString() : toChineseNum(currentCount);
-            const prefixMatch = title.match(/^第(\s*)/);
-            const suffixMatch = title.match(/([0-9]+|[零一二三四五六七八九十百千]+)(\s*)章/);
-            const space1 = prefixMatch ? prefixMatch[1] : '';
-            const space2 = suffixMatch ? suffixMatch[2] : '';
-            map.set(node.key, `第${space1}${newNumStr}${space2}章 `);
-          } else {
-            map.set(node.key, counters.slice(1, level + 1).join('.') + ' ');
-          }
+      if (level >= 1 && level <= 6 && !isTOC) {
+        counters[level]++;
+        for (let i = level + 1; i <= 6; i++) counters[i] = 0;
+
+        if (chineseMatch) {
+          const originalNumStr = chineseMatch[1];
+          const isArabic = /^[0-9]+$/.test(originalNumStr);
+          const currentCount = counters[level];
+          const newNumStr = isArabic ? currentCount.toString() : toChineseNum(currentCount);
+          const prefixMatch = title.match(/^第(\s*)/);
+          const suffixMatch = title.match(/([0-9]+|[零一二三四五六七八九十百千]+)(\s*)章/);
+          const space1 = prefixMatch ? prefixMatch[1] : '';
+          const space2 = suffixMatch ? suffixMatch[2] : '';
+          map.set(node.key, `第${space1}${newNumStr}${space2}章 `);
+        } else {
+          map.set(node.key, counters.slice(1, level + 1).join('.') + ' ');
         }
+      }
 
-        if (node.children && node.children.length > 0) {
-          traverse(node.children);
-        }
+      if (node.children && node.children.length > 0) {
+        traverse(node.children);
       }
     });
   };

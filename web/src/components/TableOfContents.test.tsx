@@ -20,11 +20,13 @@ const teamStoreState = {
 };
 
 vi.mock('../store/useDocStore', () => ({
-  useDocStore: () => docStoreState,
+  useDocStore: (selector?: (s: typeof docStoreState) => any) =>
+    selector ? selector(docStoreState) : docStoreState,
 }));
 
 vi.mock('../store/useTeamStore', () => ({
-  useTeamStore: () => teamStoreState,
+  useTeamStore: (selector?: (s: typeof teamStoreState) => any) =>
+    selector ? selector(teamStoreState) : teamStoreState,
 }));
 
 vi.mock('../utils/numbering', () => ({

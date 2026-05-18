@@ -1,5 +1,6 @@
-import React, { useMemo } from 'react';
+import React, { useMemo, useCallback } from 'react';
 import { Tree, Empty, Spin, Tooltip } from 'antd';
+import type { DataNode } from 'antd/es/tree';
 import { DownOutlined } from '@ant-design/icons';
 import { useDocStore } from '../store/useDocStore';
 import { useTeamStore } from '../store/useTeamStore';
@@ -10,15 +11,66 @@ interface TableOfContentsProps {
   onSelect?: (node: HeadingNode) => void;
 }
 
+const OLD_NUMBER_REGEX = /^(\d+([\.\、]\d+)*[\.\、\s]*|第\s*[0-9零一二三四五六七八九十百千]+\s*章[\.\s]*)/;
+
 const TableOfContents: React.FC<TableOfContentsProps> = ({ onSelect }) => {
-  const { headings, isParsing, checkedKeys, setCheckedKeys, documentMode } = useDocStore();
-  const { currentUserRole } = useTeamStore();
+  const headings = useDocStore((s) => s.headings);
+  const isParsing = useDocStore((s) => s.isParsing);
+  const checkedKeys = useDocStore((s) => s.checkedKeys);
+  const setCheckedKeys = useDocStore((s) => s.setCheckedKeys);
+  const documentMode = useDocStore((s) => s.documentMode);
+  const currentUserRole = useTeamStore((s) => s.currentUserRole);
   const checkDisabled = documentMode === 'shared' && currentUserRole === 'reader';
 
-  // 计算动态序号 Map
   const numberingMap = useMemo(() => {
     return calculateNumbering(headings, checkedKeys);
   }, [headings, checkedKeys]);
+
+  const handleSelect = useCallback(
+    (selectedKeys: React.Key[], info: { node: DataNode }) => {
+      if (selectedKeys.length > 0 && onSelect) {
+        onSelect(info.node as HeadingNode);
+      }
+    },
+    [onSelect],
+  );
+
+  const handleCheck = useCallback(
+    (checked: React.Key[] | { checked: React.Key[]; halfChecked: React.Key[] }) => {
+      if (checkDisabled) return;
+      const nextKeys = Array.isArray(checked) ? checked : checked.checked;
+      setCheckedKeys(nextKeys as string[]);
+    },
+    [checkDisabled, setCheckedKeys],
+  );
+
+  const titleRender = useCallback(
+    (node: DataNode) => {
+      const headingNode = node as HeadingNode;
+      const numberStr = numberingMap.get(headingNode.key);
+      let displayTitle = headingNode.title;
+      const match = displayTitle.match(OLD_NUMBER_REGEX);
+      if (match) {
+        displayTitle = displayTitle.substring(match[0].length).trim();
+      }
+      return (
+        <Tooltip title={headingNode.title} mouseEnterDelay={0.3}>
+          <span style={{
+            overflow: 'hidden',
+            textOverflow: 'ellipsis',
+            whiteSpace: 'nowrap',
+            display: 'inline-block',
+            verticalAlign: 'bottom',
+            maxWidth: 'calc(100% - 24px)',
+          }}>
+            {numberStr && <span style={{ marginRight: '4px' }}>{numberStr}</span>}
+            {displayTitle}
+          </span>
+        </Tooltip>
+      );
+    },
+    [numberingMap],
+  );
 
   if (isParsing) {
     return (
@@ -36,52 +88,6 @@ const TableOfContents: React.FC<TableOfContentsProps> = ({ onSelect }) => {
       </div>
     );
   }
-
-  const handleSelect = (selectedKeys: React.Key[], info: any) => {
-    if (selectedKeys.length > 0 && onSelect) {
-      onSelect(info.node as HeadingNode);
-    }
-  };
-
-  const handleCheck = (checked: React.Key[] | { checked: React.Key[]; halfChecked: React.Key[] }) => {
-    if (checkDisabled) {
-      return;
-    }
-
-    const nextKeys = Array.isArray(checked) ? checked : checked.checked;
-    (window as any).__lastCheckedKeys = nextKeys;
-    setCheckedKeys(nextKeys as string[]);
-  };
-
-  const titleRender = (node: any) => {
-    const headingNode = node as HeadingNode;
-    const numberStr = numberingMap.get(headingNode.key);
-    let displayTitle = headingNode.title;
-
-    // 总是尝试移除 displayTitle 开头的旧序号，确保未选中时不显示静态序号
-    // 匹配：数字序号 (1.1) 或 中文序号 (第X章)
-    const oldNumberRegex = /^(\d+([\.\、]\d+)*[\.\、\s]*|第\s*[0-9零一二三四五六七八九十百千]+\s*章[\.\s]*)/;
-    const match = displayTitle.match(oldNumberRegex);
-    if (match) {
-            displayTitle = displayTitle.substring(match[0].length).trim();
-    }
-    
-    return (
-      <Tooltip title={headingNode.title} mouseEnterDelay={0.3}>
-        <span style={{ 
-          overflow: 'hidden', 
-          textOverflow: 'ellipsis', 
-          whiteSpace: 'nowrap', 
-          display: 'inline-block',
-          verticalAlign: 'bottom',
-          maxWidth: 'calc(100% - 24px)' // Leave some space for icons/checkbox
-        }}>
-          {numberStr && <span style={{ marginRight: '4px' }}>{numberStr}</span>}
-          {displayTitle}
-        </span>
-      </Tooltip>
-    );
-  };
 
   return (
     <div style={{ flex: 1, overflow: 'auto', width: '100%' }}>
