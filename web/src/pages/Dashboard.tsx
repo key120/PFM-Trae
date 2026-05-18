@@ -16,6 +16,7 @@ import {
 import { isWebCryptoAvailable } from '../services/cryptoKeyService';
 import { useTeamStore } from '../store/useTeamStore';
 import type { SaveProgressInfo } from '../services/documentSaveProgress';
+import { createSmoothProgressTracker } from '../services/documentSaveProgress';
 import { createDocumentLoadCache } from '../services/documentLoadCache';
 
 const Dashboard: React.FC = () => {
@@ -186,9 +187,11 @@ const Dashboard: React.FC = () => {
       return;
     }
 
+    const tracker = createSmoothProgressTracker();
+
     try {
       setSaving(true);
-      setSaveProgress({ stage: 'preparing', percent: 0, message: '准备中...' });
+      setSaveProgress(tracker.getCurrentProgress());
       const selectedKeys = checkedKeys as string[];
       const blob: Blob = currentFile;
 
@@ -203,7 +206,7 @@ const Dashboard: React.FC = () => {
           version: values.version,
           remark: values.remark,
           selectedKeys,
-          onProgress: (info) => setSaveProgress(info),
+          onProgress: (info) => setSaveProgress(tracker.onStageChange(info.stage, info.encryptingProgress)),
         });
 
         setCurrentDocumentId(result.documentId);
@@ -224,7 +227,7 @@ const Dashboard: React.FC = () => {
         version: values.version,
         remark: values.remark,
         selectedKeys,
-        onProgress: (info) => setSaveProgress(info),
+        onProgress: (info) => setSaveProgress(tracker.onStageChange(info.stage, info.encryptingProgress)),
       });
 
       setCurrentDocumentId(result.documentId);
@@ -239,6 +242,7 @@ const Dashboard: React.FC = () => {
       message.error(errorMessage);
       setSaveProgress(null);
     } finally {
+      tracker.dispose();
       setSaving(false);
     }
   };
