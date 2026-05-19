@@ -97,6 +97,7 @@ export class SmoothProgressTracker {
   private startTime: number;
   private currentStage: SaveProgressStage = 'preparing';
   private estimatedTotal: number;
+  private estimateFrozen = false;
   private encryptingProgress?: { chunkIndex: number; totalChunks: number };
   private animFrameId: number | null = null;
   private callback: SaveProgressCallback;
@@ -112,15 +113,23 @@ export class SmoothProgressTracker {
     stage: SaveProgressStage,
     encryptingProgress?: { chunkIndex: number; totalChunks: number },
   ): void {
-    // 进入新阶段时，用已完成阶段的实际耗时更新预估总时间
     if (stage !== this.currentStage) {
       const elapsed = Date.now() - this.startTime;
       const prevUpperBound = STAGE_UPPER_BOUNDS[this.currentStage];
       this.currentStage = stage;
 
-      // 用已完成阶段的耗时和其上限百分比来估算总时间
-      if (prevUpperBound > 0) {
-        this.estimatedTotal = (elapsed / prevUpperBound) * 100;
+      // 仅在进入慢阶段（uploading）之前更新估算，之后冻结
+      // 避免 uploading 期间因估算过小导致进度瞬间跳到上限
+      if (!this.estimateFrozen && prevUpperBound > 0) {
+        this.estimatedTotal = Math.max(
+          (elapsed / prevUpperBound) * 100,
+          elapsed + 2000, // 保证剩余阶段至少有 2s 动画空间
+        );
+      }
+
+      // 进入 uploading 后冻结估算，让进度匀速推进
+      if (stage === 'uploading') {
+        this.estimateFrozen = true;
       }
     }
 
