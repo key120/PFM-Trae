@@ -2,30 +2,23 @@ import { describe, expect, it, vi } from 'vitest';
 import { render, screen, waitFor } from '@testing-library/react';
 import userEvent from '@testing-library/user-event';
 import SaveDocumentModal from './SaveDocumentModal';
-import type { SaveProgressInfo } from '../services/documentSaveProgress';
 
 describe('SaveDocumentModal', () => {
-  it('保存中会展示阶段文案与进度条，作为后续进度 UI 的稳定断言位置', async () => {
+  it('保存中会展示进度条', async () => {
     const handleOk = vi.fn();
     const handleCancel = vi.fn();
-    const progress: SaveProgressInfo = {
-      stage: 'encrypting',
-      percent: 46,
-      message: '加密中...',
-    };
 
     render(
       <SaveDocumentModal
         open
         confirmLoading
         saving
-        saveProgress={progress}
+        fileSize={1024 * 1024}
         onOk={handleOk}
         onCancel={handleCancel}
       />,
     );
 
-    expect(screen.getByText('加密中...')).toBeInTheDocument();
     const progressEl = document.querySelector('.ant-progress');
     expect(progressEl).toBeTruthy();
   });
@@ -40,7 +33,7 @@ describe('SaveDocumentModal', () => {
         open
         confirmLoading
         saving
-        saveProgress={{ stage: 'encrypting', percent: 30, message: '加密中...' }}
+        fileSize={1024 * 1024}
         onOk={handleOk}
         onCancel={handleCancel}
       />,
@@ -56,7 +49,6 @@ describe('SaveDocumentModal', () => {
         open
         confirmLoading={false}
         saving={false}
-        saveProgress={null}
         onOk={handleOk}
         onCancel={handleCancel}
       />,

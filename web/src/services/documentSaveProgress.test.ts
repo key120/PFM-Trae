@@ -1,5 +1,5 @@
-import { describe, expect, it, vi, beforeEach, afterEach } from 'vitest';
-import { computeSaveProgress, SmoothProgressTracker } from './documentSaveProgress';
+import { describe, expect, it } from 'vitest';
+import { computeSaveProgress, estimateSaveDuration } from './documentSaveProgress';
 
 describe('computeSaveProgress', () => {
   it('preparing 阶段返回 0%', () => {
@@ -64,115 +64,36 @@ describe('computeSaveProgress', () => {
   });
 });
 
-describe('SmoothProgressTracker', () => {
-  let mockRAF: ReturnType<typeof vi.fn>;
-  let mockCAF: ReturnType<typeof vi.fn>;
-  let rafCallback: FrameRequestCallback | null;
-
-  beforeEach(() => {
-    rafCallback = null;
-    mockRAF = vi.fn((cb: FrameRequestCallback) => {
-      rafCallback = cb;
-      return 1;
-    });
-    mockCAF = vi.fn();
-    vi.stubGlobal('requestAnimationFrame', mockRAF);
-    vi.stubGlobal('cancelAnimationFrame', mockCAF);
+describe('estimateSaveDuration', () => {
+  it('小文件（500KB）估算约 2s（最小值）', () => {
+    const ms = estimateSaveDuration(500 * 1024);
+    expect(ms).toBeGreaterThanOrEqual(2000);
+    expect(ms).toBeLessThan(3000);
   });
 
-  afterEach(() => {
-    vi.restoreAllMocks();
+  it('1MB 文件估算约 2.5s', () => {
+    const ms = estimateSaveDuration(1024 * 1024);
+    // 0.5/20*1000 + 0.5/2*1000 + 1000 = 25 + 250 + 1000 = 1275, capped at 2000
+    expect(ms).toBeGreaterThanOrEqual(2000);
+    expect(ms).toBeLessThan(3000);
   });
 
-  it('初始阶段返回 preparing 且 percent 为 0', () => {
-    const tracker = new SmoothProgressTracker(() => {});
-    const result = tracker.getCurrentProgress();
-    expect(result.stage).toBe('preparing');
-    expect(result.percent).toBe(0);
-    expect(result.message).toBe('准备中...');
-    tracker.dispose();
+  it('5MB 文件估算约 3.7s', () => {
+    const ms = estimateSaveDuration(5 * 1024 * 1024);
+    // 5/20*1000 + 5/2*1000 + 1000 = 250 + 2500 + 1000 = 3750
+    expect(ms).toBeGreaterThanOrEqual(3500);
+    expect(ms).toBeLessThan(4000);
   });
 
-  it('构造时启动动画循环', () => {
-    const tracker = new SmoothProgressTracker(() => {});
-    expect(mockRAF).toHaveBeenCalled();
-    tracker.dispose();
+  it('20MB 文件估算约 12s', () => {
+    const ms = estimateSaveDuration(20 * 1024 * 1024);
+    // 20/20*1000 + 20/2*1000 + 1000 = 1000 + 10000 + 1000 = 12000
+    expect(ms).toBeGreaterThanOrEqual(11000);
+    expect(ms).toBeLessThan(13000);
   });
 
-  it('dispose 取消动画循环', () => {
-    const tracker = new SmoothProgressTracker(() => {});
-    tracker.dispose();
-    expect(mockCAF).toHaveBeenCalled();
-  });
-
-  it('onStageChange 后 getCurrentProgress 返回新阶段', () => {
-    const tracker = new SmoothProgressTracker(() => {});
-    tracker.onStageChange('encrypting');
-    expect(tracker.getCurrentProgress().stage).toBe('encrypting');
-    tracker.dispose();
-  });
-
-  it('进度不超过当前阶段上限', () => {
-    const tracker = new SmoothProgressTracker(() => {});
-    tracker.onStageChange('encrypting');
-    expect(tracker.getCurrentProgress().percent).toBeLessThanOrEqual(30);
-    tracker.dispose();
-  });
-
-  it('encrypting 阶段带 chunk 进度时在子范围内', () => {
-    const tracker = new SmoothProgressTracker(() => {});
-    tracker.onStageChange('encrypting', { chunkIndex: 1, totalChunks: 2 });
-    const result = tracker.getCurrentProgress();
-    expect(result.percent).toBeGreaterThanOrEqual(0);
-    expect(result.percent).toBeLessThanOrEqual(30);
-    tracker.dispose();
-  });
-
-  it('uploading 阶段上限为 85%', () => {
-    const tracker = new SmoothProgressTracker(() => {});
-    tracker.onStageChange('uploading');
-    expect(tracker.getCurrentProgress().percent).toBeLessThanOrEqual(85);
-    expect(tracker.getCurrentProgress().stage).toBe('uploading');
-    tracker.dispose();
-  });
-
-  it('persisting 阶段上限为 99%', () => {
-    const tracker = new SmoothProgressTracker(() => {});
-    tracker.onStageChange('persisting');
-    expect(tracker.getCurrentProgress().percent).toBeLessThanOrEqual(99);
-    expect(tracker.getCurrentProgress().stage).toBe('persisting');
-    tracker.dispose();
-  });
-
-  it('done 阶段返回 100%', () => {
-    const tracker = new SmoothProgressTracker(() => {});
-    tracker.onStageChange('done');
-    expect(tracker.getCurrentProgress().percent).toBe(100);
-    expect(tracker.getCurrentProgress().message).toBe('保存完成');
-    tracker.dispose();
-  });
-
-  it('failed 阶段返回 0%', () => {
-    const tracker = new SmoothProgressTracker(() => {});
-    tracker.onStageChange('failed');
-    expect(tracker.getCurrentProgress().percent).toBe(0);
-    expect(tracker.getCurrentProgress().message).toBe('保存失败');
-    tracker.dispose();
-  });
-
-  it('dispose 后 getCurrentProgress 仍可调用', () => {
-    const tracker = new SmoothProgressTracker(() => {});
-    tracker.onStageChange('uploading');
-    tracker.dispose();
-    const result = tracker.getCurrentProgress();
-    expect(result.stage).toBe('uploading');
-  });
-
-  it('动画循环调用回调', () => {
-    const callback = vi.fn();
-    const tracker = new SmoothProgressTracker(callback);
-    rafCallback?.(performance.now());
-    expect(callback).toHaveBeenCalled();
-    tracker.dispose();
+  it('返回值始终 >= 2000ms', () => {
+    expect(estimateSaveDuration(0)).toBeGreaterThanOrEqual(2000);
+    expect(estimateSaveDuration(100)).toBeGreaterThanOrEqual(2000);
   });
 });

@@ -1,6 +1,6 @@
-import React, { useEffect } from 'react';
+import React, { useEffect, useRef, useState } from 'react';
 import { Modal, Form, Input, Progress } from 'antd';
-import type { SaveProgressInfo } from '../services/documentSaveProgress';
+import { estimateSaveDuration } from '../services/documentSaveProgress';
 
 interface SaveDocumentModalProps {
   open: boolean;
@@ -10,7 +10,7 @@ interface SaveDocumentModalProps {
   defaultVersion?: string | null;
   validateVersion?: (version: string) => Promise<void>;
   saving?: boolean;
-  saveProgress?: SaveProgressInfo | null;
+  fileSize?: number;
 }
 
 const SaveDocumentModal: React.FC<SaveDocumentModalProps> = ({
@@ -21,9 +21,15 @@ const SaveDocumentModal: React.FC<SaveDocumentModalProps> = ({
   defaultVersion,
   validateVersion,
   saving = false,
-  saveProgress = null,
+  fileSize = 0,
 }) => {
   const [form] = Form.useForm<{ version: string; remark: string }>();
+  const [percent, setPercent] = useState(0);
+  const [message, setMessage] = useState('准备中...');
+  const animRef = useRef<number | null>(null);
+  const startTimeRef = useRef(0);
+  const durationRef = useRef(5000);
+  const targetRef = useRef(0);
 
   useEffect(() => {
     if (open) {
@@ -33,6 +39,54 @@ const SaveDocumentModal: React.FC<SaveDocumentModalProps> = ({
       });
     }
   }, [open, form, defaultVersion]);
+
+  // saving 变为 true 时启动虚拟进度动画
+  useEffect(() => {
+    if (saving && fileSize > 0) {
+      const duration = estimateSaveDuration(fileSize);
+      startTimeRef.current = performance.now();
+      durationRef.current = duration;
+      targetRef.current = 95;
+      setPercent(0);
+      setMessage('加密中...');
+
+      const tick = (now: number) => {
+        const elapsed = now - startTimeRef.current;
+        const progress = Math.min((elapsed / durationRef.current) * 95, targetRef.current);
+        setPercent(Math.floor(progress));
+
+        // 根据进度更新阶段文案
+        if (progress < 5) setMessage('准备中...');
+        else if (progress < 30) setMessage('加密中...');
+        else if (progress < 85) setMessage('上传中...');
+        else setMessage('保存中...');
+
+        if (progress < targetRef.current) {
+          animRef.current = requestAnimationFrame(tick);
+        }
+      };
+      animRef.current = requestAnimationFrame(tick);
+    }
+
+    return () => {
+      if (animRef.current !== null) {
+        cancelAnimationFrame(animRef.current);
+        animRef.current = null;
+      }
+    };
+  }, [saving, fileSize]);
+
+  // saving 变为 false 时跳到 100%
+  useEffect(() => {
+    if (!saving && percent > 0 && percent < 100) {
+      if (animRef.current !== null) {
+        cancelAnimationFrame(animRef.current);
+        animRef.current = null;
+      }
+      setPercent(100);
+      setMessage('保存完成');
+    }
+  }, [saving, percent]);
 
   const handleOk = async () => {
     const values = await form.validateFields();
@@ -82,12 +136,12 @@ const SaveDocumentModal: React.FC<SaveDocumentModalProps> = ({
           />
         </Form.Item>
       </Form>
-      {saving && saveProgress && (
+      {saving && (
         <div style={{ marginTop: 8 }}>
-          <Progress percent={saveProgress.percent} status="active" />
-          {saveProgress.message && (
+          <Progress percent={percent} status="active" />
+          {message && (
             <div style={{ textAlign: 'center', marginTop: 8, color: '#666' }}>
-              {saveProgress.message}
+              {message}
             </div>
           )}
         </div>

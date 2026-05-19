@@ -15,8 +15,6 @@ import {
 } from '../services/documentService';
 import { isWebCryptoAvailable } from '../services/cryptoKeyService';
 import { useTeamStore } from '../store/useTeamStore';
-import type { SaveProgressInfo } from '../services/documentSaveProgress';
-import { createSmoothProgressTracker } from '../services/documentSaveProgress';
 import { createDocumentLoadCache } from '../services/documentLoadCache';
 
 const Dashboard: React.FC = () => {
@@ -42,7 +40,6 @@ const Dashboard: React.FC = () => {
   } = useDocStore();
   const [exporting, setExporting] = React.useState(false);
   const [saving, setSaving] = React.useState(false);
-  const [saveProgress, setSaveProgress] = React.useState<SaveProgressInfo | null>(null);
   const documentLoadCacheRef = React.useRef(createDocumentLoadCache());
   const renderedHtmlForPreview = React.useMemo(() => {
     if (currentDocumentId && currentDocumentVersion && currentFile) {
@@ -187,8 +184,6 @@ const Dashboard: React.FC = () => {
       return;
     }
 
-    const tracker = createSmoothProgressTracker((info) => setSaveProgress(info));
-
     try {
       setSaving(true);
       const selectedKeys = checkedKeys as string[];
@@ -205,7 +200,7 @@ const Dashboard: React.FC = () => {
           version: values.version,
           remark: values.remark,
           selectedKeys,
-          onProgress: (info) => tracker.onStageChange(info.stage, info.encryptingProgress),
+          onProgress: () => {},
         });
 
         setCurrentDocumentId(result.documentId);
@@ -213,7 +208,6 @@ const Dashboard: React.FC = () => {
         setSaveModalOpen(false);
         window.dispatchEvent(new Event('sharedDocumentsChanged'));
         message.success('保存成功');
-        setSaveProgress(null);
         return;
       }
 
@@ -226,7 +220,7 @@ const Dashboard: React.FC = () => {
         version: values.version,
         remark: values.remark,
         selectedKeys,
-        onProgress: (info) => tracker.onStageChange(info.stage, info.encryptingProgress),
+        onProgress: () => {},
       });
 
       setCurrentDocumentId(result.documentId);
@@ -234,14 +228,11 @@ const Dashboard: React.FC = () => {
       setSaveModalOpen(false);
       window.dispatchEvent(new Event('personalDocumentsChanged'));
       message.success('保存成功');
-      setSaveProgress(null);
     } catch (error) {
       console.error('Save failed:', error);
       const errorMessage = error instanceof Error && error.message ? error.message : '保存失败，请重试';
       message.error(errorMessage);
-      setSaveProgress(null);
     } finally {
-      tracker.dispose();
       setSaving(false);
     }
   };
@@ -414,7 +405,7 @@ const Dashboard: React.FC = () => {
         open={saveModalOpen}
         confirmLoading={saving}
         saving={saving}
-        saveProgress={saveProgress}
+        fileSize={currentFile?.size}
         onOk={handleSaveConfirm}
         onCancel={handleCloseSaveModal}
         defaultVersion={currentDocumentVersion}
