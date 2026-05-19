@@ -95,44 +95,44 @@ const STAGE_UPPER_BOUNDS: Record<SaveProgressStage, number> = {
 
 export class SmoothProgressTracker {
   private startTime: number;
-  private stageStartTime: number;
   private currentStage: SaveProgressStage = 'preparing';
-  private completedStageElapsed = 0;
   private estimatedTotal: number;
-  private lastPercent = 0;
   private encryptingProgress?: { chunkIndex: number; totalChunks: number };
+  private animFrameId: number | null = null;
+  private callback: SaveProgressCallback;
 
-  constructor() {
+  constructor(callback: SaveProgressCallback) {
     this.startTime = Date.now();
-    this.stageStartTime = this.startTime;
     this.estimatedTotal = 5000; // 初始保守估计
+    this.callback = callback;
+    this.startAnimation();
   }
 
   onStageChange(
     stage: SaveProgressStage,
     encryptingProgress?: { chunkIndex: number; totalChunks: number },
-  ): SaveProgressInfo {
-    // 进入新阶段时，累加前一阶段的耗时
+  ): void {
+    // 进入新阶段时，用已完成阶段的实际耗时更新预估总时间
     if (stage !== this.currentStage) {
-      this.completedStageElapsed += Date.now() - this.stageStartTime;
-      this.stageStartTime = Date.now();
+      const elapsed = Date.now() - this.startTime;
+      const prevUpperBound = STAGE_UPPER_BOUNDS[this.currentStage];
       this.currentStage = stage;
+
+      // 用已完成阶段的耗时和其上限百分比来估算总时间
+      if (prevUpperBound > 0) {
+        this.estimatedTotal = (elapsed / prevUpperBound) * 100;
+      }
     }
 
     if (stage === 'encrypting' && encryptingProgress) {
       this.encryptingProgress = encryptingProgress;
     }
-
-    this.updateEstimatedTotal();
-
-    return this.getCurrentProgress();
   }
 
   getCurrentProgress(): SaveProgressInfo {
-    const percent = this.computePercent();
     return {
       stage: this.currentStage,
-      percent,
+      percent: this.computePercent(),
       message: STAGE_MESSAGES[this.currentStage],
       encryptingProgress:
         this.currentStage === 'encrypting' ? this.encryptingProgress : undefined,
@@ -140,7 +140,10 @@ export class SmoothProgressTracker {
   }
 
   dispose(): void {
-    // 无需清理定时器；方法为 API 一致性保留
+    if (this.animFrameId !== null) {
+      cancelAnimationFrame(this.animFrameId);
+      this.animFrameId = null;
+    }
   }
 
   private computePercent(): number {
@@ -160,27 +163,21 @@ export class SmoothProgressTracker {
       const chunkPercent = totalChunks > 0
         ? (chunkIndex / totalChunks) * upperBound
         : upperBound;
-      const blended = Math.max(rawPercent, chunkPercent);
-      this.lastPercent = Math.min(blended, upperBound);
-    } else {
-      this.lastPercent = Math.min(rawPercent, upperBound);
+      return Math.floor(Math.min(Math.max(rawPercent, chunkPercent), upperBound));
     }
 
-    return Math.floor(this.lastPercent);
+    return Math.floor(Math.min(rawPercent, upperBound));
   }
 
-  private updateEstimatedTotal(): number {
-    const upperBound = STAGE_UPPER_BOUNDS[this.currentStage];
-    if (upperBound <= 0) return this.estimatedTotal;
-
-    const elapsed = Date.now() - this.startTime;
-    if (elapsed > 0 && upperBound > 0) {
-      this.estimatedTotal = (elapsed / upperBound) * 100;
-    }
-    return this.estimatedTotal;
+  private startAnimation(): void {
+    const tick = () => {
+      this.callback(this.getCurrentProgress());
+      this.animFrameId = requestAnimationFrame(tick);
+    };
+    this.animFrameId = requestAnimationFrame(tick);
   }
 }
 
-export function createSmoothProgressTracker(): SmoothProgressTracker {
-  return new SmoothProgressTracker();
+export function createSmoothProgressTracker(callback: SaveProgressCallback): SmoothProgressTracker {
+  return new SmoothProgressTracker(callback);
 }

@@ -187,11 +187,10 @@ const Dashboard: React.FC = () => {
       return;
     }
 
-    const tracker = createSmoothProgressTracker();
+    const tracker = createSmoothProgressTracker((info) => setSaveProgress(info));
 
     try {
       setSaving(true);
-      setSaveProgress(tracker.getCurrentProgress());
       const selectedKeys = checkedKeys as string[];
       const blob: Blob = currentFile;
 
@@ -206,7 +205,7 @@ const Dashboard: React.FC = () => {
           version: values.version,
           remark: values.remark,
           selectedKeys,
-          onProgress: (info) => setSaveProgress(tracker.onStageChange(info.stage, info.encryptingProgress)),
+          onProgress: (info) => tracker.onStageChange(info.stage, info.encryptingProgress),
         });
 
         setCurrentDocumentId(result.documentId);
@@ -227,7 +226,7 @@ const Dashboard: React.FC = () => {
         version: values.version,
         remark: values.remark,
         selectedKeys,
-        onProgress: (info) => setSaveProgress(tracker.onStageChange(info.stage, info.encryptingProgress)),
+        onProgress: (info) => tracker.onStageChange(info.stage, info.encryptingProgress),
       });
 
       setCurrentDocumentId(result.documentId);
