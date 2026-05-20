@@ -1,5 +1,5 @@
 import React, { useEffect, useRef, useState } from 'react';
-import { Modal, Form, Input, Progress } from 'antd';
+import { Modal, Form, Input, Progress, Button } from 'antd';
 import { estimateSaveDuration } from '../services/documentSaveProgress';
 
 interface SaveDocumentModalProps {
@@ -110,6 +110,18 @@ const SaveDocumentModal: React.FC<SaveDocumentModalProps> = ({
       cancelText="取消"
       okButtonProps={saving ? { disabled: true } : undefined}
       cancelButtonProps={saving ? { disabled: true } : undefined}
+      footer={
+        <div className="save-modal-footer">
+          <div className="save-modal-footer-buttons">
+            {saving && <span className="save-modal-stage-text">{message}</span>}
+            <Button onClick={saving ? undefined : onCancel} disabled={saving}>取消</Button>
+            <Button type="primary" onClick={handleOk} disabled={saving} loading={confirmLoading}>保存</Button>
+          </div>
+          <div className={`save-modal-progress-row ${saving ? 'visible' : ''}`}>
+            <Progress percent={percent} showInfo={false} />
+          </div>
+        </div>
+      }
     >
       <Form form={form} layout="vertical">
         <Form.Item
@@ -136,16 +148,6 @@ const SaveDocumentModal: React.FC<SaveDocumentModalProps> = ({
           />
         </Form.Item>
       </Form>
-      {saving && (
-        <div style={{ marginTop: 8 }}>
-          <Progress percent={percent} status="active" />
-          {message && (
-            <div style={{ textAlign: 'center', marginTop: 8, color: '#666' }}>
-              {message}
-            </div>
-          )}
-        </div>
-      )}
     </Modal>
   );
 };
