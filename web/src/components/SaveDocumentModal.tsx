@@ -1,6 +1,7 @@
 import React, { useEffect, useRef, useState } from 'react';
 import { Modal, Form, Input, Progress, Button } from 'antd';
 import { estimateSaveDuration } from '../services/documentSaveProgress';
+import './SaveDocumentModal.css';
 
 interface SaveDocumentModalProps {
   open: boolean;
@@ -106,10 +107,6 @@ const SaveDocumentModal: React.FC<SaveDocumentModalProps> = ({
       confirmLoading={confirmLoading}
       onOk={handleOk}
       onCancel={saving ? undefined : onCancel}
-      okText="保存"
-      cancelText="取消"
-      okButtonProps={saving ? { disabled: true } : undefined}
-      cancelButtonProps={saving ? { disabled: true } : undefined}
       footer={
         <div className="save-modal-footer">
           <div className="save-modal-footer-buttons">

@@ -1,0 +1,34 @@
+.save-modal-footer {
+  margin: 0;
+  padding: 0;
+}
+
+.save-modal-footer-buttons {
+  display: flex;
+  justify-content: flex-end;
+  align-items: center;
+  gap: 8px;
+  margin-bottom: 0;
+}
+
+.save-modal-stage-text {
+  flex: 1;
+  text-align: right;
+  margin-right: 8px;
+  color: #666;
+  font-size: 14px;
+}
+
+.save-modal-progress-row {
+  height: 20px;
+  opacity: 0;
+  transition: opacity 0.3s;
+}
+
+.save-modal-progress-row.visible {
+  opacity: 1;
+}
+
+.save-modal-progress-row .ant-progress {
+  margin: 0;
+}
