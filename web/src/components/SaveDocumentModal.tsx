@@ -1,5 +1,5 @@
 import React, { useEffect } from 'react';
-import { Modal, Form, Input, Button } from 'antd';
+import { Modal, Form, Input, Progress, Button } from 'antd';
 import { useVirtualProgress } from '../hooks/useVirtualProgress';
 import './SaveDocumentModal.css';
 
@@ -29,6 +29,7 @@ const SaveDocumentModal: React.FC<SaveDocumentModalProps> = ({
     fileSize,
     isActive: saving,
     stageMessages: ['准备中...', '加密中...', '上传中...', '保存中...'],
+    completionMessage: '保存完成',
   });
 
   useEffect(() => {
@@ -61,18 +62,12 @@ const SaveDocumentModal: React.FC<SaveDocumentModalProps> = ({
       footer={
         <div className="save-modal-footer">
           <div className="save-modal-footer-buttons">
-            {saving && <span className="save-modal-stage-text">{message}（{percent}%）</span>}
+            {saving && <span className="save-modal-stage-text">{message}</span>}
             <Button onClick={saving ? undefined : onCancel} disabled={saving}>取消</Button>
             <Button type="primary" onClick={handleOk} disabled={saving} loading={confirmLoading}>保存</Button>
           </div>
           <div className={`save-modal-progress-row ${saving ? 'visible' : ''}`}>
-            <div className="ant-progress ant-progress-line ant-progress-status-normal ant-progress-show-info" role="progressbar" aria-valuenow={percent} aria-valuemin={0} aria-valuemax={100}>
-              <div className="ant-progress-outer">
-                <div className="ant-progress-inner">
-                  <div className="ant-progress-bg" style={{ width: `${percent}%`, backgroundColor: '#1677ff' }}></div>
-                </div>
-              </div>
-            </div>
+            <Progress percent={percent} showInfo={false} />
           </div>
         </div>
       }
@@ -93,13 +88,12 @@ const SaveDocumentModal: React.FC<SaveDocumentModalProps> = ({
             },
           ]}
         >
-          <Input placeholder="例如：V1.0.0" disabled={saving} />
+          <Input placeholder="例如：V1.0.0" />
         </Form.Item>
         <Form.Item label="备注" name="remark">
           <Input.TextArea
             placeholder="选填，对本次保存做一个简单说明"
             rows={3}
-            disabled={saving}
           />
         </Form.Item>
       </Form>

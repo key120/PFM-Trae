@@ -4,6 +4,7 @@ interface UseVirtualProgressOptions {
   fileSize: number;
   isActive: boolean;
   stageMessages?: string[];
+  completionMessage?: string;
 }
 
 interface UseVirtualProgressResult {
@@ -26,6 +27,7 @@ export function useVirtualProgress({
   fileSize,
   isActive,
   stageMessages = DEFAULT_STAGE_MESSAGES,
+  completionMessage = '载入完成',
 }: UseVirtualProgressOptions): UseVirtualProgressResult {
   const [percent, setPercent] = useState(0);
   const [message, setMessage] = useState(stageMessages[0]);
@@ -35,6 +37,8 @@ export function useVirtualProgress({
   const startedRef = useRef(false);
   const stageMessagesRef = useRef(stageMessages);
   stageMessagesRef.current = stageMessages;
+  const completionMessageRef = useRef(completionMessage);
+  completionMessageRef.current = completionMessage;
 
   useEffect(() => {
     const msgs = stageMessagesRef.current;
@@ -81,7 +85,7 @@ export function useVirtualProgress({
       }
       startedRef.current = false;
       setPercent(100);
-      setMessage('载入完成');
+      setMessage(completionMessageRef.current);
     }
   }, [isActive, percent]);
 
