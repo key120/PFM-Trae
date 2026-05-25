@@ -33,27 +33,30 @@ export function useVirtualProgress({
   const startTimeRef = useRef(0);
   const durationRef = useRef(5000);
   const startedRef = useRef(false);
+  const stageMessagesRef = useRef(stageMessages);
+  stageMessagesRef.current = stageMessages;
 
   useEffect(() => {
+    const msgs = stageMessagesRef.current;
     if (isActive && fileSize > 0) {
       const duration = estimateLoadDuration(fileSize);
       startTimeRef.current = performance.now();
       durationRef.current = duration;
       startedRef.current = true;
       setPercent(0);
-      setMessage(stageMessages[0]);
+      setMessage(msgs[0]);
 
       const tick = (now: number) => {
         const elapsed = now - startTimeRef.current;
         const progress = Math.min((elapsed / durationRef.current) * 95, 95);
         setPercent(Math.floor(progress));
 
-        const stageCount = stageMessages.length;
+        const stageCount = msgs.length;
         const stageIndex = Math.min(
           Math.floor((progress / 100) * stageCount),
           stageCount - 1,
         );
-        setMessage(stageMessages[stageIndex]);
+        setMessage(msgs[stageIndex]);
 
         if (progress < 95) {
           animRef.current = requestAnimationFrame(tick);
@@ -68,7 +71,7 @@ export function useVirtualProgress({
         animRef.current = null;
       }
     };
-  }, [isActive, fileSize, stageMessages]);
+  }, [isActive, fileSize]);
 
   useEffect(() => {
     if (!isActive && startedRef.current && percent < 100) {
@@ -87,6 +90,7 @@ export function useVirtualProgress({
       cancelAnimationFrame(animRef.current);
       animRef.current = null;
     }
+    startedRef.current = false;
     setPercent(0);
     setMessage(stageMessages[0]);
   };

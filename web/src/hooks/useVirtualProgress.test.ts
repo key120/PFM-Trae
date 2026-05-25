@@ -98,4 +98,22 @@ describe('useVirtualProgress', () => {
 
     expect(window.requestAnimationFrame).not.toHaveBeenCalled();
   });
+
+  it('isActive 快速切换时仍能跳到 100%', () => {
+    const { result, rerender } = renderHook(
+      ({ isActive }) =>
+        useVirtualProgress({
+          fileSize: 1024 * 1024,
+          isActive,
+          stageMessages: ['阶段1', '阶段2', '阶段3', '阶段4'],
+        }),
+      { initialProps: { isActive: true } },
+    );
+
+    // 不 advanceTimers，直接切换到 false
+    rerender({ isActive: false });
+
+    expect(result.current.percent).toBe(100);
+    expect(result.current.message).toBe('载入完成');
+  });
 });
