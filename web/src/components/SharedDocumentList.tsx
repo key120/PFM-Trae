@@ -11,6 +11,8 @@ import {
 } from '../services/documentService';
 import { ensureUserKeyPair, restoreUserPrivateKey } from '../services/cryptoKeyService';
 import { fetchTeamMembers } from '../services/teamService';
+import { useVirtualProgress } from '../hooks/useVirtualProgress';
+import CardProgressBar from './CardProgressBar';
 
 interface SharedDocumentListProps {
   open: boolean;
@@ -53,6 +55,14 @@ const SharedDocumentList: React.FC<SharedDocumentListProps> = ({ open, onLoaded 
   const [error, setError] = useState<string | null>(null);
   const [documents, setDocuments] = useState<SharedDocumentCard[]>([]);
   const [loadingDocumentId, setLoadingDocumentId] = useState<string | null>(null);
+
+  const currentLoadingDoc = documents.find((d) => d.id === loadingDocumentId);
+  const { percent, message: progressMessage } = useVirtualProgress({
+    fileSize: currentLoadingDoc?.size || 0,
+    isActive: loadingDocumentId !== null,
+    stageMessages: ['准备中...', '获取密钥...', '下载中...', '解密中...'],
+  });
+
   useEffect(() => {
     if (!open || !userId || !currentTeamId) {
       return;
@@ -267,6 +277,9 @@ const SharedDocumentList: React.FC<SharedDocumentListProps> = ({ open, onLoaded 
                 )}
               </div>
             </div>
+            {loadingDocumentId === item.id && (
+              <CardProgressBar percent={percent} message={progressMessage} visible={true} />
+            )}
           </Card>
         );
       })}

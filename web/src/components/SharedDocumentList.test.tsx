@@ -151,4 +151,36 @@ describe('SharedDocumentList', () => {
       expect(setCurrentTeamScopedShare).toHaveBeenCalledWith(true);
     });
   });
+
+  it('载入共享文档时显示当前卡片的进度条', async () => {
+    const user = userEvent.setup();
+
+    const sharedDocuments: SharedDocumentCard[] = [
+      {
+        id: 'doc-owner',
+        name: '我共享的文档',
+        size: 1024,
+        sharedAt: '2026-05-01T00:00:00Z',
+        sharedBy: 'tester@example.com',
+        version: 'V2.0.0',
+        versions: [{ version: 'V2.0.0', remark: '共享修改', author: 'tester@example.com', createdAt: '2026-05-01T00:00:00Z', sizeBytes: 1024 }],
+        isOwner: true,
+      },
+    ];
+
+    vi.mocked(documentService.fetchSharedDocumentsForCurrentTeam).mockResolvedValue(sharedDocuments);
+    vi.mocked(documentService.loadSharedDocument).mockImplementation(() => new Promise(() => undefined));
+
+    render(<SharedDocumentList open />);
+
+    await waitFor(() => expect(screen.getByText('我共享的文档')).toBeInTheDocument());
+
+    expect(screen.queryByRole('progressbar')).not.toBeInTheDocument();
+
+    await user.click(screen.getByRole('button', { name: /载\s*入/ }));
+
+    await waitFor(() => {
+      expect(screen.getByRole('progressbar')).toBeInTheDocument();
+    });
+  });
 });
