@@ -1,6 +1,6 @@
-import React, { useEffect, useRef, useState } from 'react';
-import { Modal, Form, Input, Progress, Button } from 'antd';
-import { estimateSaveDuration } from '../services/documentSaveProgress';
+import React, { useEffect } from 'react';
+import { Modal, Form, Input, Button } from 'antd';
+import { useVirtualProgress } from '../hooks/useVirtualProgress';
 import './SaveDocumentModal.css';
 
 interface SaveDocumentModalProps {
@@ -25,12 +25,11 @@ const SaveDocumentModal: React.FC<SaveDocumentModalProps> = ({
   fileSize = 0,
 }) => {
   const [form] = Form.useForm<{ version: string; remark: string }>();
-  const [percent, setPercent] = useState(0);
-  const [message, setMessage] = useState('准备中...');
-  const animRef = useRef<number | null>(null);
-  const startTimeRef = useRef(0);
-  const durationRef = useRef(5000);
-  const targetRef = useRef(0);
+  const { percent, message } = useVirtualProgress({
+    fileSize,
+    isActive: saving,
+    stageMessages: ['准备中...', '加密中...', '上传中...', '保存中...'],
+  });
 
   useEffect(() => {
     if (open) {
@@ -40,54 +39,6 @@ const SaveDocumentModal: React.FC<SaveDocumentModalProps> = ({
       });
     }
   }, [open, form, defaultVersion]);
-
-  // saving 变为 true 时启动虚拟进度动画
-  useEffect(() => {
-    if (saving && fileSize > 0) {
-      const duration = estimateSaveDuration(fileSize);
-      startTimeRef.current = performance.now();
-      durationRef.current = duration;
-      targetRef.current = 95;
-      setPercent(0);
-      setMessage('加密中...');
-
-      const tick = (now: number) => {
-        const elapsed = now - startTimeRef.current;
-        const progress = Math.min((elapsed / durationRef.current) * 95, targetRef.current);
-        setPercent(Math.floor(progress));
-
-        // 根据进度更新阶段文案
-        if (progress < 5) setMessage('准备中...');
-        else if (progress < 30) setMessage('加密中...');
-        else if (progress < 85) setMessage('上传中...');
-        else setMessage('保存中...');
-
-        if (progress < targetRef.current) {
-          animRef.current = requestAnimationFrame(tick);
-        }
-      };
-      animRef.current = requestAnimationFrame(tick);
-    }
-
-    return () => {
-      if (animRef.current !== null) {
-        cancelAnimationFrame(animRef.current);
-        animRef.current = null;
-      }
-    };
-  }, [saving, fileSize]);
-
-  // saving 变为 false 时跳到 100%
-  useEffect(() => {
-    if (!saving && percent > 0 && percent < 100) {
-      if (animRef.current !== null) {
-        cancelAnimationFrame(animRef.current);
-        animRef.current = null;
-      }
-      setPercent(100);
-      setMessage('保存完成');
-    }
-  }, [saving, percent]);
 
   const handleOk = async () => {
     const values = await form.validateFields();
@@ -110,12 +61,18 @@ const SaveDocumentModal: React.FC<SaveDocumentModalProps> = ({
       footer={
         <div className="save-modal-footer">
           <div className="save-modal-footer-buttons">
-            {saving && <span className="save-modal-stage-text">{message}</span>}
+            {saving && <span className="save-modal-stage-text">{message}（{percent}%）</span>}
             <Button onClick={saving ? undefined : onCancel} disabled={saving}>取消</Button>
             <Button type="primary" onClick={handleOk} disabled={saving} loading={confirmLoading}>保存</Button>
           </div>
           <div className={`save-modal-progress-row ${saving ? 'visible' : ''}`}>
-            <Progress percent={percent} showInfo={false} />
+            <div className="ant-progress ant-progress-line ant-progress-status-normal ant-progress-show-info" role="progressbar" aria-valuenow={percent} aria-valuemin={0} aria-valuemax={100}>
+              <div className="ant-progress-outer">
+                <div className="ant-progress-inner">
+                  <div className="ant-progress-bg" style={{ width: `${percent}%`, backgroundColor: '#1677ff' }}></div>
+                </div>
+              </div>
+            </div>
           </div>
         </div>
       }
@@ -136,12 +93,13 @@ const SaveDocumentModal: React.FC<SaveDocumentModalProps> = ({
             },
           ]}
         >
-          <Input placeholder="例如：V1.0.0" />
+          <Input placeholder="例如：V1.0.0" disabled={saving} />
         </Form.Item>
         <Form.Item label="备注" name="remark">
           <Input.TextArea
             placeholder="选填，对本次保存做一个简单说明"
             rows={3}
+            disabled={saving}
           />
         </Form.Item>
       </Form>
