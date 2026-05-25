@@ -259,6 +259,36 @@ describe('PersonalDocumentList', () => {
     expect(setCurrentTeamScopedShare).toHaveBeenCalledWith(false);
   });
 
+  it('载入个人文档时显示当前卡片的进度条', async () => {
+    const user = userEvent.setup();
+    const loader = vi.fn().mockResolvedValue([
+      {
+        id: 'doc-1',
+        name: '测试文档',
+        size: 1024,
+        createdAt: '2025-01-01T00:00:00Z',
+        updatedAt: '2025-01-02T00:00:00Z',
+      },
+    ]);
+
+    const loadMock = documentService.loadPersonalDocument as unknown as MockFn;
+    loadMock.mockImplementation(() => new Promise(() => undefined));
+
+    render(<PersonalDocumentList open loader={loader} />);
+
+    await waitFor(() => {
+      expect(screen.getByText('测试文档')).toBeTruthy();
+    });
+
+    expect(screen.queryByRole('progressbar')).not.toBeInTheDocument();
+
+    await user.click(screen.getByRole('button', { name: /载.*入/ }));
+
+    await waitFor(() => {
+      expect(screen.getByRole('progressbar')).toBeInTheDocument();
+    });
+  });
+
   it('首次载入抛出 KEY_NOT_READY 时会初始化密钥并自动重试', async () => {
     const user = userEvent.setup();
     const loader = vi.fn().mockResolvedValue([

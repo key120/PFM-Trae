@@ -13,6 +13,8 @@ import {
 } from '../services/documentService';
 import { ensureUserKeyPair, restoreUserPrivateKey } from '../services/cryptoKeyService';
 import { fetchTeamGroups, fetchTeamMembers, TeamGroupSummary, TeamMemberSummary } from '../services/teamService';
+import { useVirtualProgress } from '../hooks/useVirtualProgress';
+import CardProgressBar from './CardProgressBar';
 
 interface PersonalDocumentListProps {
   open: boolean;
@@ -62,6 +64,13 @@ const PersonalDocumentList: React.FC<PersonalDocumentListProps> = ({ open, loade
   const [error, setError] = useState<string | null>(null);
   const [documents, setDocuments] = useState<PersonalDocument[]>([]);
   const [loadingDocumentId, setLoadingDocumentId] = useState<string | null>(null);
+
+  const currentLoadingDoc = documents.find((d) => d.id === loadingDocumentId);
+  const { percent, message: progressMessage } = useVirtualProgress({
+    fileSize: currentLoadingDoc?.size || 0,
+    isActive: loadingDocumentId !== null,
+    stageMessages: ['准备中...', '获取密钥...', '下载中...', '解密中...'],
+  });
 
   const loadPersonalDocs = React.useCallback(
     (targetUserId: string) => {
@@ -612,6 +621,9 @@ const PersonalDocumentList: React.FC<PersonalDocumentListProps> = ({ open, loade
                 </Button>
               </div>
             </div>
+            {loadingDocumentId === item.id && (
+              <CardProgressBar percent={percent} message={progressMessage} visible={true} />
+            )}
           </Card>
         );
       })}
