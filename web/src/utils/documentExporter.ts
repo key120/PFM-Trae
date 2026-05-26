@@ -8,6 +8,20 @@ interface PreparedExport {
   fileName: string;
 }
 
+const OLD_NUMBER_REGEX = /^[\s﻿\xA0]*(\d+([\.\、]\d+)*[\.\、\s﻿\xA0]*|第\s*[0-9零一二三四五六七八九十百千]+\s*章[\.\s﻿\xA0]*)/;
+
+const stripBomAndOldNumber = (title: string): string => {
+  let clean = title.trim();
+  if (clean.charCodeAt(0) === 0xFEFF) {
+    clean = clean.slice(1);
+  }
+  const match = clean.match(OLD_NUMBER_REGEX);
+  if (match) {
+    clean = clean.substring(match[0].length).trim();
+  }
+  return clean;
+};
+
 const prepareExport = async (
   file: File,
   selectedKeys: string[],
@@ -24,6 +38,7 @@ const prepareExport = async (
   const docDom = parser.parseFromString(documentXmlStr, 'application/xml');
   const stylesDom = parser.parseFromString(stylesXmlStr, 'application/xml');
   const styleMap = buildStyleMap(stylesDom);
+  const tocStyleMap = buildTocStyleMap(stylesDom);
   const parentMap = new Map<string, string>();
   const stack: HeadingNode[] = [];
   for (const node of flatHeadings) {
@@ -50,11 +65,18 @@ const prepareExport = async (
   if (!body) {
     throw new Error('Invalid DOCX: no body found');
   }
+
+  const tocDetected = hasToc(body, tocStyleMap);
+
   const children = Array.from(body.childNodes);
   let currentHeadingIndex = 0;
   let shouldKeep = true;
   for (const child of children) {
     if (child.nodeName === 'w:p') {
+      if (tocDetected && isTocParagraph(child as Element, tocStyleMap)) {
+        body.removeChild(child);
+        continue;
+      }
       const level = getHeadingLevel(child as Element, styleMap);
       if (level !== null) {
         if (currentHeadingIndex < flatHeadings.length) {
@@ -75,7 +97,19 @@ const prepareExport = async (
       body.removeChild(child);
     }
   }
-  await updateSettingsForToc(zip);
+
+  if (tocDetected) {
+    const selectedHeadings = flatHeadings
+      .filter(h => effectiveSelectedSet.has(h.key))
+      .map(h => {
+        const num = numberingMap.get(h.key) || '';
+        const cleanTitle = stripBomAndOldNumber(h.title);
+        return { level: h.level, title: `${num}${cleanTitle}` };
+      });
+    rebuildToc(body, selectedHeadings, tocStyleMap, docDom);
+    await updateSettingsForToc(zip);
+  }
+
   const serializer = new XMLSerializer();
   const newDocumentXml = serializer.serializeToString(docDom);
   zip.file('word/document.xml', newDocumentXml);
@@ -108,12 +142,8 @@ export const exportDocumentToBlob = async (
 
 /**
  * 应用新的序号到标题段落
- * 1. 显式禁用自动编号 (w:numPr -> w:numId w:val="0")
- * 2. 更新 w:t 文本，添加新序号前缀
  */
 const applyNewNumbering = (pNode: Element, newNumber: string, originalTitle: string) => {
-  // 1. 处理自动编号属性 (w:numPr)
-  // 为了彻底禁用来自样式的自动编号，我们需要显式设置 numId 为 0
   let pPr = pNode.getElementsByTagName('w:pPr')[0];
   if (!pPr) {
     pPr = pNode.ownerDocument.createElement('w:pPr');
@@ -125,25 +155,21 @@ const applyNewNumbering = (pNode: Element, newNumber: string, originalTitle: str
     numPr = pNode.ownerDocument.createElement('w:numPr');
     pPr.appendChild(numPr);
   }
-  
-  // 清除 numPr 下的所有子节点
+
   while (numPr.firstChild) {
     numPr.removeChild(numPr.firstChild);
   }
-  
-  // 添加 <w:numId w:val="0"/>
+
   const numId = pNode.ownerDocument.createElement('w:numId');
   numId.setAttribute('w:val', '0');
   numPr.appendChild(numId);
 
-  // 2. 更新文本内容
   const runs = Array.from(pNode.getElementsByTagName('w:r'));
-  if (runs.length === 0) return; 
+  if (runs.length === 0) return;
 
-  // 找到第一个包含文本的 run
   let targetRun = runs[0];
   let tNode = targetRun.getElementsByTagName('w:t')[0];
-  
+
   if (!tNode) {
       const textRun = runs.find(r => r.getElementsByTagName('w:t').length > 0);
       if (textRun) {
@@ -154,44 +180,27 @@ const applyNewNumbering = (pNode: Element, newNumber: string, originalTitle: str
           targetRun.appendChild(tNode);
       }
   }
-  
-  // 清洗 originalTitle (移除旧序号)
-  // 增强正则：支持 BOM、NBSP 等
-  // 匹配：数字序号 (1.1) 或 中文序号 (第X章)
-  let displayTitle = originalTitle.trim();
-  // 移除可能存在的 BOM
-  if (displayTitle.charCodeAt(0) === 0xFEFF) {
-      displayTitle = displayTitle.slice(1);
-  }
-  
-  const oldNumberRegex = /^[\s\uFEFF\xA0]*(\d+([\.\、]\d+)*[\.\、\s\uFEFF\xA0]*|第\s*[0-9零一二三四五六七八九十百千]+\s*章[\.\s\uFEFF\xA0]*)/;
-  const match = displayTitle.match(oldNumberRegex);
-  if (match) {
-      displayTitle = displayTitle.substring(match[0].length).trim();
-  }
-  
+
+  const displayTitle = stripBomAndOldNumber(originalTitle);
   const fullNewText = `${newNumber}${displayTitle}`;
-  
-  // 设置新文本
+
   tNode.setAttribute('xml:space', 'preserve');
   tNode.textContent = fullNewText;
-  
-  // 移除其他 run 中的文本
+
   for (let i = 0; i < runs.length; i++) {
       if (runs[i] === targetRun) continue;
       const otherTs = Array.from(runs[i].getElementsByTagName('w:t'));
-      otherTs.forEach(t => t.textContent = ''); 
+      otherTs.forEach(t => t.textContent = '');
   }
 };
 
 /**
  * 解析 styles.xml，找出所有标题样式的 ID
- * 返回 Map<styleId, level>
  */
 const buildStyleMap = (stylesDom: Document): Map<string, number> => {
   const map = new Map<string, number>();
   const styles = stylesDom.getElementsByTagName('w:style');
-  
+
   for (let i = 0; i < styles.length; i++) {
     const style = styles[i];
     const styleId = style.getAttribute('w:styleId');
@@ -199,51 +208,190 @@ const buildStyleMap = (stylesDom: Document): Map<string, number> => {
 
     const nameNode = style.getElementsByTagName('w:name')[0];
     const nameVal = nameNode ? nameNode.getAttribute('w:val') : '';
-    
-    // 检查是否是 heading 1-9
-    // Word 的标准样式名通常是 "heading 1", "heading 2" 等 (大小写可能不同)
+
     if (nameVal) {
       const match = nameVal.match(/^heading\s*(\d)$/i);
       if (match) {
         map.set(styleId, parseInt(match[1]));
         continue;
       }
-      
-      // 中文 Word 可能是 "标题 1"
+
       const matchCN = nameVal.match(/^标题\s*(\d)$/);
       if (matchCN) {
         map.set(styleId, parseInt(matchCN[1]));
       }
     }
   }
-  
+
   return map;
 };
 
 /**
- * 检查段落是否是标题，如果是返回层级(1-9)，否则返回 null
+ * 解析 styles.xml，找出所有 TOC 样式的 ID
+ */
+const buildTocStyleMap = (stylesDom: Document): Map<string, number> => {
+  const map = new Map<string, number>();
+  const styles = stylesDom.getElementsByTagName('w:style');
+  for (let i = 0; i < styles.length; i++) {
+    const style = styles[i];
+    const styleId = style.getAttribute('w:styleId');
+    if (!styleId) continue;
+    const nameNode = style.getElementsByTagName('w:name')[0];
+    const nameVal = nameNode ? nameNode.getAttribute('w:val') : '';
+    if (nameVal) {
+      const match = nameVal.match(/^toc\s*(\d)$/i);
+      if (match) { map.set(styleId, parseInt(match[1])); continue; }
+      const matchCN = nameVal.match(/^目录\s*(\d)$/);
+      if (matchCN) { map.set(styleId, parseInt(matchCN[1])); }
+    }
+  }
+  return map;
+};
+
+/**
+ * 检查文档 body 中是否存在 TOC 段落
+ */
+const hasToc = (body: Element, tocStyleMap: Map<string, number>): boolean => {
+  if (tocStyleMap.size === 0) return false;
+  const paragraphs = body.getElementsByTagName('w:p');
+  for (let i = 0; i < paragraphs.length; i++) {
+    const pStyle = paragraphs[i].getElementsByTagName('w:pStyle')[0];
+    if (pStyle) {
+      const styleId = pStyle.getAttribute('w:val');
+      if (styleId && tocStyleMap.has(styleId)) return true;
+    }
+  }
+  return false;
+};
+
+/**
+ * 判断一个段落节点是否是 TOC 段落
+ */
+const isTocParagraph = (pNode: Element, tocStyleMap: Map<string, number>): boolean => {
+  const pStyle = pNode.getElementsByTagName('w:pStyle')[0];
+  if (!pStyle) return false;
+  const styleId = pStyle.getAttribute('w:val');
+  return !!(styleId && tocStyleMap.has(styleId));
+};
+
+/**
+ * 根据 heading level 查找对应的 TOC 样式 ID
+ */
+const getTocStyleId = (level: number, tocStyleMap: Map<string, number>): string | null => {
+  for (const [styleId, styleLevel] of tocStyleMap) {
+    if (styleLevel === level) return styleId;
+  }
+  let bestId: string | null = null;
+  let bestLevel = 0;
+  for (const [styleId, styleLevel] of tocStyleMap) {
+    if (styleLevel <= level && styleLevel > bestLevel) {
+      bestId = styleId;
+      bestLevel = styleLevel;
+    }
+  }
+  if (!bestId) {
+    let maxLevel = 0;
+    for (const [styleId, styleLevel] of tocStyleMap) {
+      if (styleLevel > maxLevel) { bestId = styleId; maxLevel = styleLevel; }
+    }
+  }
+  return bestId;
+};
+
+/**
+ * 重建 TOC：使用单个多段落域结构
+ * 第一个段落包含 begin/instrText/separate，最后一个段落包含 end
+ */
+const rebuildToc = (
+  body: Element,
+  selectedHeadings: Array<{ level: number; title: string }>,
+  tocStyleMap: Map<string, number>,
+  doc: Document
+): void => {
+  if (selectedHeadings.length === 0) return;
+
+  const maxLevel = selectedHeadings.reduce((max, h) => Math.max(max, h.level), 1);
+  const firstElementChild = body.children[0] || null;
+
+  for (let i = 0; i < selectedHeadings.length; i++) {
+    const heading = selectedHeadings[i];
+    const styleId = getTocStyleId(heading.level, tocStyleMap);
+    if (!styleId) continue;
+
+    const p = doc.createElement('w:p');
+
+    // w:pPr > w:pStyle
+    const pPr = doc.createElement('w:pPr');
+    const pStyle = doc.createElement('w:pStyle');
+    pStyle.setAttribute('w:val', styleId);
+    pPr.appendChild(pStyle);
+    p.appendChild(pPr);
+
+    // 第一个段落：begin + instrText + separate
+    if (i === 0) {
+      const runBegin = doc.createElement('w:r');
+      const fldCharBegin = doc.createElement('w:fldChar');
+      fldCharBegin.setAttribute('w:fldCharType', 'begin');
+      runBegin.appendChild(fldCharBegin);
+      p.appendChild(runBegin);
+
+      const runInstr = doc.createElement('w:r');
+      const instrText = doc.createElement('w:instrText');
+      instrText.setAttribute('xml:space', 'preserve');
+      instrText.textContent = ` TOC \\o "1-${maxLevel}" \\h \\z \\u `;
+      runInstr.appendChild(instrText);
+      p.appendChild(runInstr);
+
+      const runSep = doc.createElement('w:r');
+      const fldCharSep = doc.createElement('w:fldChar');
+      fldCharSep.setAttribute('w:fldCharType', 'separate');
+      runSep.appendChild(fldCharSep);
+      p.appendChild(runSep);
+    }
+
+    // 标题文字
+    const runText = doc.createElement('w:r');
+    const tNode = doc.createElement('w:t');
+    tNode.setAttribute('xml:space', 'preserve');
+    tNode.textContent = heading.title;
+    runText.appendChild(tNode);
+    p.appendChild(runText);
+
+    // 最后一个段落：end
+    if (i === selectedHeadings.length - 1) {
+      const runEnd = doc.createElement('w:r');
+      const fldCharEnd = doc.createElement('w:fldChar');
+      fldCharEnd.setAttribute('w:fldCharType', 'end');
+      runEnd.appendChild(fldCharEnd);
+      p.appendChild(runEnd);
+    }
+
+    body.insertBefore(p, firstElementChild);
+  }
+};
+
+/**
+ * 检查段落是否是标题
  */
 const getHeadingLevel = (pNode: Element, styleMap: Map<string, number>): number | null => {
   const pPr = pNode.getElementsByTagName('w:pPr')[0];
   if (!pPr) return null;
-  
+
   const pStyle = pPr.getElementsByTagName('w:pStyle')[0];
   if (!pStyle) return null;
-  
+
   const styleId = pStyle.getAttribute('w:val');
   if (!styleId) return null;
-  
-  // 1. 查表
+
   if (styleMap.has(styleId)) {
     return styleMap.get(styleId)!;
   }
-  
-  // 2. 备用逻辑：直接看 styleId 字符串 (mammoth 也能识别 Heading1)
+
   const match = styleId.match(/^Heading(\d)$/i);
   if (match) {
     return parseInt(match[1]);
   }
-  
+
   return null;
 };
 
@@ -259,7 +407,6 @@ const updateSettingsForToc = async (zip: JSZip) => {
   if (settingsXml) {
     doc = parser.parseFromString(settingsXml, 'application/xml');
   } else {
-    // 如果没有 settings.xml，创建一个最基本的
     doc = parser.parseFromString(
       '<?xml version="1.0" encoding="UTF-8" standalone="yes"?><w:settings xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main"></w:settings>',
       'application/xml'
@@ -268,7 +415,6 @@ const updateSettingsForToc = async (zip: JSZip) => {
 
   const settings = doc.getElementsByTagName('w:settings')[0];
   if (settings) {
-    // 检查是否已有 updateFields
     let updateFields = doc.getElementsByTagName('w:updateFields')[0];
     if (!updateFields) {
       updateFields = doc.createElement('w:updateFields');
