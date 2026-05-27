@@ -31,8 +31,10 @@ let cachedWorker: Worker | null = null;
 const getWorker = (): Worker | null => {
   if (cachedWorker) return cachedWorker;
   try {
-    const url = new URL('../workers/docHeadingExtract.worker.ts', import.meta.url).href;
-    cachedWorker = new Worker(url, { type: 'module' });
+    cachedWorker = new Worker(
+      new URL('../workers/docHeadingExtract.worker.ts', import.meta.url),
+      { type: 'module' },
+    );
     return cachedWorker;
   } catch {
     return null;
