@@ -3,6 +3,7 @@ import { Alert, Button, Card, Dropdown, Empty, Skeleton, Tag, Typography, messag
 import { useAuthStore } from '../store/useAuthStore';
 import { useDocStore } from '../store/useDocStore';
 import { useTeamStore } from '../store/useTeamStore';
+import './PersonalDocumentList.css';
 import {
   fetchPersonalDocumentsForCurrentTeam,
   isDocumentSharedInTeam,
@@ -10,6 +11,7 @@ import {
   PersonalDocument,
   shareDocument,
   unshareDocument,
+  deleteDocument,
 } from '../services/documentService';
 import { ensureUserKeyPair, restoreUserPrivateKey } from '../services/cryptoKeyService';
 import { fetchTeamGroups, fetchTeamMembers, TeamGroupSummary, TeamMemberSummary } from '../services/teamService';
@@ -59,11 +61,13 @@ const PersonalDocumentList: React.FC<PersonalDocumentListProps> = ({ open, loade
     setDocumentMode,
     setDocumentAccessRole,
     setCurrentTeamScopedShare,
+    reset,
   } = useDocStore();
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [documents, setDocuments] = useState<PersonalDocument[]>([]);
   const [loadingDocumentId, setLoadingDocumentId] = useState<string | null>(null);
+  const [deletingDocumentId, setDeletingDocumentId] = useState<string | null>(null);
 
   const currentLoadingDoc = documents.find((d) => d.id === loadingDocumentId);
   const { percent, message: progressMessage } = useVirtualProgress({
@@ -466,6 +470,42 @@ const PersonalDocumentList: React.FC<PersonalDocumentListProps> = ({ open, loade
     }
   };
 
+  const handleDeleteDocument = (item: PersonalDocument) => {
+    Modal.confirm({
+      title: '确认删除',
+      content: `确定要删除文档"${item.name}"吗？此操作不可恢复。`,
+      okText: '删除',
+      cancelText: '取消',
+      okButtonProps: { danger: true },
+      centered: true,
+      className: 'delete-confirm-modal',
+      onOk: async () => {
+        if (!user) return;
+        try {
+          setDeletingDocumentId(item.id);
+          await deleteDocument(item.id, user.id);
+
+          const currentId = useDocStore.getState().currentDocumentId;
+          if (currentId === item.id) {
+            reset();
+          }
+
+          setDocuments((prev) => prev.filter((d) => d.id !== item.id));
+          setShareStatusByDocId((prev) => {
+            const next = { ...prev };
+            delete next[item.id];
+            return next;
+          });
+          message.success('文档已删除');
+        } catch (error) {
+          message.error(error instanceof Error ? error.message : '删除失败');
+        } finally {
+          setDeletingDocumentId(null);
+        }
+      },
+    });
+  };
+
   if (!open) {
     return null;
   }
@@ -618,6 +658,15 @@ const PersonalDocumentList: React.FC<PersonalDocumentListProps> = ({ open, loade
                   }
                 >
                   {isShared ? '取消共享' : '共享'}
+                </Button>
+                <Button
+                  size="small"
+                  danger
+                  loading={deletingDocumentId === item.id}
+                  disabled={loadingDocumentId === item.id}
+                  onClick={() => handleDeleteDocument(item)}
+                >
+                  删除
                 </Button>
               </div>
             </div>

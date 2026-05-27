@@ -154,7 +154,7 @@ describe('exportDocumentToBlob - TOC rebuild', () => {
     expect(tocCount).toBe(2);
   });
 
-  it('含 TOC 的文档导出后 TOC 段落包含域代码', async () => {
+  it('含 TOC 的文档导出后包含 TOC 域代码', async () => {
     const documentXml = buildDocumentXml([
       { styleId: 'TOC1', text: '旧目录条目' },
       { styleId: 'Heading1', text: '第一章 引言' },
@@ -171,20 +171,14 @@ describe('exportDocumentToBlob - TOC rebuild', () => {
     const blob = await exportDocumentToBlob(file, ['h1', 'h2', 'h3'], headings, headings);
     const doc = await parseExportedDocx(blob);
 
-    // 检查第一个 TOC 段落包含 instrText
-    const allParagraphs = doc.getElementsByTagName('w:p');
+    // 检查文档中存在包含 TOC 指令的域代码（在容器段落中）
+    const instrTexts = doc.getElementsByTagName('w:instrText');
     let foundInstrText = false;
-    for (let i = 0; i < allParagraphs.length; i++) {
-      const pStyle = allParagraphs[i].getElementsByTagName('w:pStyle')[0];
-      if (pStyle && /^TOC\d$/i.test(pStyle.getAttribute('w:val') || '')) {
-        const instrTexts = allParagraphs[i].getElementsByTagName('w:instrText');
-        if (instrTexts.length > 0) {
-          const text = instrTexts[0].textContent || '';
-          if (text.includes('TOC')) {
-            foundInstrText = true;
-            break;
-          }
-        }
+    for (let i = 0; i < instrTexts.length; i++) {
+      const text = instrTexts[i].textContent || '';
+      if (text.includes('TOC')) {
+        foundInstrText = true;
+        break;
       }
     }
 
@@ -285,5 +279,52 @@ describe('exportDocumentToBlob - TOC rebuild', () => {
     const updateFields = settingsDoc!.getElementsByTagName('w:updateFields')[0];
     expect(updateFields).toBeDefined();
     expect(updateFields.getAttribute('w:val')).toBe('true');
+  });
+
+  it('TOC 条目包含超链接（w:hyperlink）', async () => {
+    const documentXml = buildDocumentXml([
+      { styleId: 'TOC1', text: '旧目录条目' },
+      { styleId: 'Heading1', text: '第一章 引言' },
+      { styleId: 'Heading1', text: '第二章 方法' },
+    ]);
+    const file = await createTestDocx(documentXml, TOC_STYLES_XML);
+    const headings = [
+      makeHeading('h1', '第一章 引言', 1),
+      makeHeading('h2', '第二章 方法', 1),
+    ];
+
+    const blob = await exportDocumentToBlob(file, ['h1', 'h2'], headings, headings);
+    const doc = await parseExportedDocx(blob);
+
+    // 检查 TOC 条目段落中存在 w:hyperlink 元素
+    const hyperlinks = doc.getElementsByTagName('w:hyperlink');
+    expect(hyperlinks.length).toBeGreaterThanOrEqual(2);
+  });
+
+  it('TOC 条目包含 PAGE 域代码', async () => {
+    const documentXml = buildDocumentXml([
+      { styleId: 'TOC1', text: '旧目录条目' },
+      { styleId: 'Heading1', text: '第一章 引言' },
+      { styleId: 'Heading1', text: '第二章 方法' },
+    ]);
+    const file = await createTestDocx(documentXml, TOC_STYLES_XML);
+    const headings = [
+      makeHeading('h1', '第一章 引言', 1),
+      makeHeading('h2', '第二章 方法', 1),
+    ];
+
+    const blob = await exportDocumentToBlob(file, ['h1', 'h2'], headings, headings);
+    const doc = await parseExportedDocx(blob);
+
+    // 检查存在 PAGE 域指令
+    const instrTexts = doc.getElementsByTagName('w:instrText');
+    let foundPageField = false;
+    for (let i = 0; i < instrTexts.length; i++) {
+      if (instrTexts[i].textContent?.includes('PAGE')) {
+        foundPageField = true;
+        break;
+      }
+    }
+    expect(foundPageField).toBe(true);
   });
 });

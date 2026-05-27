@@ -19,8 +19,43 @@ describe('SaveDocumentModal', () => {
       />,
     );
 
-    const progressEl = document.querySelector('.ant-progress');
-    expect(progressEl).toBeTruthy();
+    await waitFor(() => {
+      expect(document.querySelector('.ant-progress')).toBeTruthy();
+    });
+  });
+
+  it('保存中版本号和备注输入框应禁用', () => {
+    render(
+      <SaveDocumentModal
+        open
+        saving
+        fileSize={1024 * 1024}
+        onOk={vi.fn()}
+        onCancel={vi.fn()}
+      />,
+    );
+
+    const versionInput = screen.getByLabelText('版本号') as HTMLInputElement;
+    const remarkInput = screen.getByLabelText('备注') as HTMLTextAreaElement;
+    expect(versionInput.disabled).toBe(true);
+    expect(remarkInput.disabled).toBe(true);
+  });
+
+  it('保存中阶段文字后动态显示百分比', async () => {
+    render(
+      <SaveDocumentModal
+        open
+        saving
+        fileSize={1024 * 1024}
+        onOk={vi.fn()}
+        onCancel={vi.fn()}
+      />,
+    );
+
+    await waitFor(() => {
+      const stageText = document.querySelector('.save-modal-stage-text');
+      expect(stageText?.textContent).toMatch(/（\d+%）$/);
+    });
   });
 
   it('保存中会限制取消关闭，保存结束后恢复正常关闭行为', async () => {

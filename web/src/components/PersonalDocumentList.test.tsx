@@ -27,17 +27,23 @@ const setInitialCheckedKeys = vi.fn();
 const setDocumentMode = vi.fn();
 const setDocumentAccessRole = vi.fn();
 const setCurrentTeamScopedShare = vi.fn();
+const reset = vi.fn();
+const mockGetState = vi.hoisted(() => vi.fn(() => ({ currentDocumentId: null })));
 
 vi.mock('../store/useDocStore', () => ({
-  useDocStore: () => ({
-    setFile,
-    setCurrentDocumentId,
-    setCurrentDocumentVersion,
-    setInitialCheckedKeys,
-    setDocumentMode,
-    setDocumentAccessRole,
-    setCurrentTeamScopedShare,
-  }),
+  useDocStore: Object.assign(
+    vi.fn(() => ({
+      setFile,
+      setCurrentDocumentId,
+      setCurrentDocumentVersion,
+      setInitialCheckedKeys,
+      setDocumentMode,
+      setDocumentAccessRole,
+      setCurrentTeamScopedShare,
+      reset,
+    })),
+    { getState: mockGetState },
+  ),
 }));
 
 vi.mock('../services/documentService');
@@ -652,5 +658,198 @@ describe('PersonalDocumentList', () => {
     });
 
     confirmSpy.mockRestore();
+  });
+
+  it('每个卡片渲染载入、共享、删除三个按钮', async () => {
+    const loader = vi.fn().mockResolvedValue([
+      {
+        id: 'doc-1',
+        name: '测试文档',
+        size: 1024,
+        createdAt: '2025-01-01T00:00:00Z',
+        updatedAt: '2025-01-01T00:00:00Z',
+      },
+    ]);
+
+    render(<PersonalDocumentList open loader={loader} />);
+
+    await waitFor(() => {
+      expect(screen.getByText('测试文档')).toBeTruthy();
+    });
+
+    expect(screen.getByRole('button', { name: /载.*入/ })).toBeTruthy();
+    expect(screen.getByRole('button', { name: /共.*享/ })).toBeTruthy();
+    expect(screen.getByRole('button', { name: /删.*除/ })).toBeTruthy();
+  });
+
+  it('点击删除按钮弹出确认弹窗', async () => {
+    const user = userEvent.setup();
+    const loader = vi.fn().mockResolvedValue([
+      {
+        id: 'doc-1',
+        name: '测试文档',
+        size: 1024,
+        createdAt: '2025-01-01T00:00:00Z',
+        updatedAt: '2025-01-01T00:00:00Z',
+      },
+    ]);
+
+    const confirmSpy = vi.spyOn(Modal, 'confirm').mockReturnValue({
+      destroy: vi.fn(),
+      update: vi.fn(),
+    } as ModalConfirmReturn);
+
+    render(<PersonalDocumentList open loader={loader} />);
+
+    await waitFor(() => {
+      expect(screen.getByText('测试文档')).toBeTruthy();
+    });
+
+    await user.click(screen.getByRole('button', { name: /删.*除/ }));
+
+    await waitFor(() => {
+      expect(confirmSpy).toHaveBeenCalledWith(
+        expect.objectContaining({
+          title: '确认删除',
+          okButtonProps: { danger: true },
+        }),
+      );
+    });
+
+    confirmSpy.mockRestore();
+  });
+
+  it('确认删除后调用 deleteDocument 并移除卡片', async () => {
+    const user = userEvent.setup();
+    const loader = vi.fn().mockResolvedValue([
+      {
+        id: 'doc-1',
+        name: '测试文档',
+        size: 1024,
+        createdAt: '2025-01-01T00:00:00Z',
+        updatedAt: '2025-01-01T00:00:00Z',
+      },
+    ]);
+
+    const deleteMock = documentService.deleteDocument as unknown as MockFn;
+    deleteMock.mockResolvedValue(undefined);
+
+    const confirmSpy = vi.spyOn(Modal, 'confirm').mockImplementation(({ onOk }) => {
+      void onOk?.();
+      return {
+        destroy: vi.fn(),
+        update: vi.fn(),
+      } as ModalConfirmReturn;
+    });
+
+    const messageSuccessSpy = vi.spyOn(message, 'success').mockImplementation(() => {
+      return undefined as MessageErrorReturn;
+    });
+
+    render(<PersonalDocumentList open loader={loader} />);
+
+    await waitFor(() => {
+      expect(screen.getByText('测试文档')).toBeTruthy();
+    });
+
+    await user.click(screen.getByRole('button', { name: /删.*除/ }));
+
+    await waitFor(() => {
+      expect(deleteMock).toHaveBeenCalledWith('doc-1', 'user-1');
+    });
+
+    await waitFor(() => {
+      expect(screen.queryByText('测试文档')).toBeNull();
+    });
+
+    expect(messageSuccessSpy).toHaveBeenCalledWith('文档已删除');
+    confirmSpy.mockRestore();
+    messageSuccessSpy.mockRestore();
+  });
+
+  it('删除当前预览的文档时重置文档 store', async () => {
+    const user = userEvent.setup();
+    const loader = vi.fn().mockResolvedValue([
+      {
+        id: 'doc-1',
+        name: '测试文档',
+        size: 1024,
+        createdAt: '2025-01-01T00:00:00Z',
+        updatedAt: '2025-01-01T00:00:00Z',
+      },
+    ]);
+
+    mockGetState.mockReturnValue({ currentDocumentId: 'doc-1' });
+
+    const deleteMock = documentService.deleteDocument as unknown as MockFn;
+    deleteMock.mockResolvedValue(undefined);
+
+    const confirmSpy = vi.spyOn(Modal, 'confirm').mockImplementation(({ onOk }) => {
+      void onOk?.();
+      return {
+        destroy: vi.fn(),
+        update: vi.fn(),
+      } as ModalConfirmReturn;
+    });
+
+    render(<PersonalDocumentList open loader={loader} />);
+
+    await waitFor(() => {
+      expect(screen.getByText('测试文档')).toBeTruthy();
+    });
+
+    await user.click(screen.getByRole('button', { name: /删.*除/ }));
+
+    await waitFor(() => {
+      expect(reset).toHaveBeenCalled();
+    });
+
+    confirmSpy.mockRestore();
+    mockGetState.mockReturnValue({ currentDocumentId: null });
+  });
+
+  it('删除失败时显示错误提示', async () => {
+    const user = userEvent.setup();
+    const loader = vi.fn().mockResolvedValue([
+      {
+        id: 'doc-1',
+        name: '测试文档',
+        size: 1024,
+        createdAt: '2025-01-01T00:00:00Z',
+        updatedAt: '2025-01-01T00:00:00Z',
+      },
+    ]);
+
+    const deleteMock = documentService.deleteDocument as unknown as MockFn;
+    deleteMock.mockRejectedValue(new Error('删除失败：网络错误'));
+
+    const confirmSpy = vi.spyOn(Modal, 'confirm').mockImplementation(({ onOk }) => {
+      void onOk?.();
+      return {
+        destroy: vi.fn(),
+        update: vi.fn(),
+      } as ModalConfirmReturn;
+    });
+
+    const messageErrorSpy = vi.spyOn(message, 'error').mockImplementation(() => {
+      return undefined as MessageErrorReturn;
+    });
+
+    render(<PersonalDocumentList open loader={loader} />);
+
+    await waitFor(() => {
+      expect(screen.getByText('测试文档')).toBeTruthy();
+    });
+
+    await user.click(screen.getByRole('button', { name: /删.*除/ }));
+
+    await waitFor(() => {
+      expect(messageErrorSpy).toHaveBeenCalledWith('删除失败：网络错误');
+    });
+
+    // 卡片仍在列表中
+    expect(screen.getByText('测试文档')).toBeTruthy();
+    confirmSpy.mockRestore();
+    messageErrorSpy.mockRestore();
   });
 });

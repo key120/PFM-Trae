@@ -20,9 +20,10 @@
 }
 
 .save-modal-progress-row {
-  height: 20px;
+  height: 4px;
   opacity: 0;
   transition: opacity 0.3s;
+  margin: 0 -20px -4px;
 }
 
 .save-modal-progress-row.visible {
@@ -31,4 +32,17 @@
 
 .save-modal-progress-row .ant-progress {
   margin: 0;
+}
+
+.save-modal-progress-row .ant-progress-inner {
+  border-radius: 0;
+}
+
+.save-modal-progress-row .ant-progress-bg {
+  border-radius: 0;
+}
+
+/* 裁剪进度条圆角，使其紧贴弹窗底边 */
+.ant-modal-container {
+  overflow: hidden;
 }

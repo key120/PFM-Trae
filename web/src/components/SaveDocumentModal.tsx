@@ -62,12 +62,12 @@ const SaveDocumentModal: React.FC<SaveDocumentModalProps> = ({
       footer={
         <div className="save-modal-footer">
           <div className="save-modal-footer-buttons">
-            {saving && <span className="save-modal-stage-text">{message}</span>}
+            {saving && <span className="save-modal-stage-text">{message}（{percent}%）</span>}
             <Button onClick={saving ? undefined : onCancel} disabled={saving}>取消</Button>
             <Button type="primary" onClick={handleOk} disabled={saving} loading={confirmLoading}>保存</Button>
           </div>
           <div className={`save-modal-progress-row ${saving ? 'visible' : ''}`}>
-            <Progress percent={percent} showInfo={false} />
+            {percent > 0 && <Progress percent={percent} showInfo={false} />}
           </div>
         </div>
       }
@@ -88,12 +88,13 @@ const SaveDocumentModal: React.FC<SaveDocumentModalProps> = ({
             },
           ]}
         >
-          <Input placeholder="例如：V1.0.0" />
+          <Input placeholder="例如：V1.0.0" disabled={saving} />
         </Form.Item>
         <Form.Item label="备注" name="remark">
           <Input.TextArea
             placeholder="选填，对本次保存做一个简单说明"
             rows={3}
+            disabled={saving}
           />
         </Form.Item>
       </Form>

@@ -3,6 +3,7 @@ import {
   savePersonalDocument,
   fetchPersonalDocuments,
   loadPersonalDocument,
+  deleteDocument,
 } from './documentService';
 import { supabase } from '../lib/supabase';
 import * as cryptoKeyService from './cryptoKeyService';
@@ -1532,5 +1533,77 @@ describe('loadPersonalDocument', () => {
     expect(result.version).toBe('V1.0.0');
     expect(result.remark).toBe('旧版文档');
     expect(result.selectedKeys).toEqual(['a', 'b']);
+  });
+
+  describe('deleteDocument', () => {
+    it('成功删除文档', async () => {
+      const singleMock = vi.fn().mockResolvedValue({ data: { owner_id: 'user-1' }, error: null });
+      const eqMock = vi.fn().mockReturnValue({ single: singleMock });
+      const selectMock = vi.fn().mockReturnValue({ eq: eqMock });
+
+      const deleteEq2Mock = vi.fn().mockResolvedValue({ error: null });
+      const deleteEq1Mock = vi.fn().mockReturnValue({ eq: deleteEq2Mock });
+      const deleteMock = vi.fn().mockReturnValue({ eq: deleteEq1Mock });
+
+      (supabase.functions.invoke as unknown as MockFn).mockResolvedValue({
+        data: { deletedCount: 0 },
+        error: null,
+      });
+
+      (supabase.from as unknown as MockFn)
+        .mockReturnValueOnce({ select: selectMock })
+        .mockReturnValueOnce({ delete: deleteMock });
+
+      await deleteDocument('doc-1', 'user-1');
+
+      expect(selectMock).toHaveBeenCalledWith('owner_id');
+      expect(eqMock).toHaveBeenCalledWith('id', 'doc-1');
+      expect(singleMock).toHaveBeenCalled();
+      expect(supabase.functions.invoke).toHaveBeenCalledWith('r2-sign-delete', {
+        body: { documentId: 'doc-1' },
+      });
+      expect(deleteMock).toHaveBeenCalled();
+      expect(deleteEq1Mock).toHaveBeenCalledWith('id', 'doc-1');
+      expect(deleteEq2Mock).toHaveBeenCalledWith('owner_id', 'user-1');
+    });
+
+    it('文档不存在时抛出错误', async () => {
+      const singleMock = vi.fn().mockResolvedValue({ data: null, error: { message: 'not found' } });
+      const eqMock = vi.fn().mockReturnValue({ single: singleMock });
+      const selectMock = vi.fn().mockReturnValue({ eq: eqMock });
+      (supabase.from as unknown as MockFn).mockReturnValue({ select: selectMock });
+
+      await expect(deleteDocument('doc-1', 'user-1')).rejects.toThrow('文档不存在');
+    });
+
+    it('非所有者删除时抛出错误', async () => {
+      const singleMock = vi.fn().mockResolvedValue({ data: { owner_id: 'other-user' }, error: null });
+      const eqMock = vi.fn().mockReturnValue({ single: singleMock });
+      const selectMock = vi.fn().mockReturnValue({ eq: eqMock });
+      (supabase.from as unknown as MockFn).mockReturnValue({ select: selectMock });
+
+      await expect(deleteDocument('doc-1', 'user-1')).rejects.toThrow('无权删除此文档');
+    });
+
+    it('Supabase 删除失败时抛出错误', async () => {
+      const singleMock = vi.fn().mockResolvedValue({ data: { owner_id: 'user-1' }, error: null });
+      const eqMock = vi.fn().mockReturnValue({ single: singleMock });
+      const selectMock = vi.fn().mockReturnValue({ eq: eqMock });
+
+      const deleteEq2Mock = vi.fn().mockResolvedValue({ error: { message: 'db error' } });
+      const deleteEq1Mock = vi.fn().mockReturnValue({ eq: deleteEq2Mock });
+      const deleteMock = vi.fn().mockReturnValue({ eq: deleteEq1Mock });
+
+      (supabase.functions.invoke as unknown as MockFn).mockResolvedValue({
+        data: { deletedCount: 0 },
+        error: null,
+      });
+
+      (supabase.from as unknown as MockFn)
+        .mockReturnValueOnce({ select: selectMock })
+        .mockReturnValueOnce({ delete: deleteMock });
+
+      await expect(deleteDocument('doc-1', 'user-1')).rejects.toThrow('删除失败：db error');
+    });
   });
 });

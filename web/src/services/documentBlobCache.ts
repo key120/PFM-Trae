@@ -138,6 +138,26 @@ export async function cacheEncryptedBlob(
 }
 
 /**
+ * Invalidate all cached blobs for a given document (by key prefix).
+ */
+export async function invalidateAllCachedBlobsForDocument(
+  documentId: string,
+): Promise<void> {
+  try {
+    const db = await openDB();
+    const entries = await getAll_entries(db);
+    const prefix = `${documentId}:`;
+    for (const entry of entries) {
+      if (entry.key.startsWith(prefix)) {
+        await deleteEntry(db, entry.key);
+      }
+    }
+  } catch {
+    // Best-effort
+  }
+}
+
+/**
  * Invalidate a specific cached blob.
  */
 export async function invalidateCachedBlob(

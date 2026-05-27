@@ -68,9 +68,27 @@ const prepareExport = async (
 
   const tocDetected = hasToc(body, tocStyleMap);
 
+  // 找到 TOC 区块之后的第一个非 TOC 元素，作为插入参考点
+  let tocInsertBeforeRef: Element | null = null;
+  if (tocDetected) {
+    const children = Array.from(body.childNodes);
+    let pastToc = false;
+    for (const child of children) {
+      if (child.nodeName === 'w:p' && isTocParagraph(child as Element, tocStyleMap)) {
+        pastToc = true;
+        continue;
+      }
+      if (pastToc && child.nodeType === 1) {
+        tocInsertBeforeRef = child as Element;
+        break;
+      }
+    }
+  }
+
   const children = Array.from(body.childNodes);
   let currentHeadingIndex = 0;
   let shouldKeep = true;
+  const headingParagraphs: Element[] = [];
   for (const child of children) {
     if (child.nodeName === 'w:p') {
       if (tocDetected && isTocParagraph(child as Element, tocStyleMap)) {
@@ -88,6 +106,7 @@ const prepareExport = async (
             if (newNumber) {
               applyNewNumbering(child as Element, newNumber, headingNode.title);
             }
+            headingParagraphs.push(child as Element);
           }
           currentHeadingIndex++;
         }
@@ -99,16 +118,38 @@ const prepareExport = async (
   }
 
   if (tocDetected) {
+    // 为选中的标题段落添加书签（用于超链接跳转）
+    const selectedKeysList = flatHeadings
+      .filter(h => effectiveSelectedSet.has(h.key))
+      .map(h => h.key);
+    addHeadingBookmarks(headingParagraphs, selectedKeysList, docDom);
+
     const selectedHeadings = flatHeadings
       .filter(h => effectiveSelectedSet.has(h.key))
-      .map(h => {
+      .map((h) => {
         const num = numberingMap.get(h.key) || '';
         const cleanTitle = stripBomAndOldNumber(h.title);
-        return { level: h.level, title: `${num}${cleanTitle}` };
+        return {
+          level: h.level,
+          title: `${num}${cleanTitle}`,
+          bookmarkName: h.key
+        };
       });
-    rebuildToc(body, selectedHeadings, tocStyleMap, docDom);
+
+    // 管理超链接关系
+    const rels = await manageHyperlinkRelationships(zip, selectedHeadings);
+
+    rebuildToc(body, tocInsertBeforeRef, selectedHeadings, rels, tocStyleMap, docDom);
     await updateSettingsForToc(zip);
   }
+
+  // 确保 r 命名空间已声明（w:hyperlink 的 r:id 需要它）
+  const R_NS = 'http://schemas.openxmlformats.org/officeDocument/2006/relationships';
+  docDom.documentElement.setAttributeNS(
+    'http://www.w3.org/2000/xmlns/',
+    'xmlns:r',
+    R_NS
+  );
 
   const serializer = new XMLSerializer();
   const newDocumentXml = serializer.serializeToString(docDom);
@@ -138,6 +179,88 @@ export const exportDocumentToBlob = async (
   const { zip } = await prepareExport(file, selectedKeys, flatHeadings, rootHeadings);
   const blob = await zip.generateAsync({ type: 'blob' });
   return blob;
+};
+
+/**
+ * 为标题段落添加书签，供 TOC 超链接跳转使用
+ */
+const addHeadingBookmarks = (
+  headingParagraphs: Element[],
+  selectedKeys: string[],
+  doc: Document
+): void => {
+  let bookmarkIndex = 0;
+  for (const p of headingParagraphs) {
+    const bookmarkName = selectedKeys[bookmarkIndex] || String(bookmarkIndex);
+    const bookmarkId = String(bookmarkIndex + 1);
+
+    const bookmarkStart = doc.createElement('w:bookmarkStart');
+    bookmarkStart.setAttribute('w:id', bookmarkId);
+    bookmarkStart.setAttribute('w:name', bookmarkName);
+    p.insertBefore(bookmarkStart, p.firstChild);
+
+    const bookmarkEnd = doc.createElement('w:bookmarkEnd');
+    bookmarkEnd.setAttribute('w:id', bookmarkId);
+    p.appendChild(bookmarkEnd);
+
+    bookmarkIndex++;
+  }
+};
+
+/**
+ * 管理 word/_rels/document.xml.rels 中的超链接关系
+ * 返回 Map<bookmarkName, relationshipId>
+ */
+const manageHyperlinkRelationships = async (
+  zip: JSZip,
+  selectedHeadings: Array<{ bookmarkName: string }>
+): Promise<Map<string, string>> => {
+  const relsMap = new Map<string, string>();
+  const relsPath = 'word/_rels/document.xml.rels';
+  const relsXmlStr = await zip.file(relsPath)?.async('string');
+
+  const parser = new DOMParser();
+  const serializer = new XMLSerializer();
+  let relsDoc: Document;
+
+  if (relsXmlStr) {
+    relsDoc = parser.parseFromString(relsXmlStr, 'application/xml');
+  } else {
+    relsDoc = parser.parseFromString(
+      '<?xml version="1.0" encoding="UTF-8" standalone="yes"?>' +
+      '<Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships"></Relationships>',
+      'application/xml'
+    );
+  }
+
+  const relsRoot = relsDoc.getElementsByTagName('Relationships')[0];
+
+  // 找到当前最大的 rId
+  const existingRels = relsRoot.getElementsByTagName('Relationship');
+  let maxRid = 0;
+  for (let i = 0; i < existingRels.length; i++) {
+    const id = existingRels[i].getAttribute('Id') || '';
+    const match = id.match(/^rId(\d+)$/);
+    if (match) {
+      maxRid = Math.max(maxRid, parseInt(match[1]));
+    }
+  }
+
+  for (const heading of selectedHeadings) {
+    maxRid++;
+    const rid = `rId${maxRid}`;
+    relsMap.set(heading.bookmarkName, rid);
+
+    const rel = relsDoc.createElement('Relationship');
+    rel.setAttribute('Id', rid);
+    rel.setAttribute('Type', 'http://schemas.openxmlformats.org/officeDocument/2006/relationships/hyperlink');
+    rel.setAttribute('Target', `#${heading.bookmarkName}`);
+    rel.setAttribute('TargetMode', 'Internal');
+    relsRoot.appendChild(rel);
+  }
+
+  zip.file(relsPath, serializer.serializeToString(relsDoc));
+  return relsMap;
 };
 
 /**
@@ -299,75 +422,154 @@ const getTocStyleId = (level: number, tocStyleMap: Map<string, number>): string 
 };
 
 /**
- * 重建 TOC：使用单个多段落域结构
- * 第一个段落包含 begin/instrText/separate，最后一个段落包含 end
+ * 重建 TOC：
+ * - 保留原始位置（insertBeforeRef）
+ * - TOC 域标记直接放在内容段落上（符合 Word 原生 TOC 结构）
+ * - 使用 w:hyperlink 实现 Ctrl+Click 跳转
+ * - 使用 PAGE 域显示页码
+ * - 使用 TOC 域让 Word/WPS 在打开时自动更新
  */
 const rebuildToc = (
   body: Element,
-  selectedHeadings: Array<{ level: number; title: string }>,
+  insertBeforeRef: Element | null,
+  selectedHeadings: Array<{ level: number; title: string; bookmarkName: string }>,
+  relsMap: Map<string, string>,
   tocStyleMap: Map<string, number>,
   doc: Document
 ): void => {
   if (selectedHeadings.length === 0) return;
 
   const maxLevel = selectedHeadings.reduce((max, h) => Math.max(max, h.level), 1);
-  const firstElementChild = body.children[0] || null;
 
-  for (let i = 0; i < selectedHeadings.length; i++) {
-    const heading = selectedHeadings[i];
+  // 第一步：构建所有 TOC 条目段落
+  const entryParagraphs: Element[] = [];
+  for (const heading of selectedHeadings) {
     const styleId = getTocStyleId(heading.level, tocStyleMap);
     if (!styleId) continue;
 
     const p = doc.createElement('w:p');
 
-    // w:pPr > w:pStyle
+    // 段落样式
     const pPr = doc.createElement('w:pPr');
     const pStyle = doc.createElement('w:pStyle');
     pStyle.setAttribute('w:val', styleId);
     pPr.appendChild(pStyle);
     p.appendChild(pPr);
 
-    // 第一个段落：begin + instrText + separate
-    if (i === 0) {
-      const runBegin = doc.createElement('w:r');
-      const fldCharBegin = doc.createElement('w:fldChar');
-      fldCharBegin.setAttribute('w:fldCharType', 'begin');
-      runBegin.appendChild(fldCharBegin);
-      p.appendChild(runBegin);
+    // 超链接包裹标题文字
+    const rid = relsMap.get(heading.bookmarkName);
+    if (rid) {
+      const hyperlink = doc.createElement('w:hyperlink');
+      hyperlink.setAttribute('w:anchor', heading.bookmarkName);
+      hyperlink.setAttribute('r:id', rid);
 
-      const runInstr = doc.createElement('w:r');
-      const instrText = doc.createElement('w:instrText');
-      instrText.setAttribute('xml:space', 'preserve');
-      instrText.textContent = ` TOC \\o "1-${maxLevel}" \\h \\z \\u `;
-      runInstr.appendChild(instrText);
-      p.appendChild(runInstr);
+      const runText = doc.createElement('w:r');
+      const rPr = doc.createElement('w:rPr');
+      const rStyle = doc.createElement('w:rStyle');
+      rStyle.setAttribute('w:val', 'Hyperlink');
+      rPr.appendChild(rStyle);
+      runText.appendChild(rPr);
+      const tNode = doc.createElement('w:t');
+      tNode.setAttribute('xml:space', 'preserve');
+      tNode.textContent = heading.title;
+      runText.appendChild(tNode);
+      hyperlink.appendChild(runText);
 
-      const runSep = doc.createElement('w:r');
-      const fldCharSep = doc.createElement('w:fldChar');
-      fldCharSep.setAttribute('w:fldCharType', 'separate');
-      runSep.appendChild(fldCharSep);
-      p.appendChild(runSep);
+      p.appendChild(hyperlink);
+    } else {
+      const runText = doc.createElement('w:r');
+      const tNode = doc.createElement('w:t');
+      tNode.setAttribute('xml:space', 'preserve');
+      tNode.textContent = heading.title;
+      runText.appendChild(tNode);
+      p.appendChild(runText);
     }
 
-    // 标题文字
-    const runText = doc.createElement('w:r');
-    const tNode = doc.createElement('w:t');
-    tNode.setAttribute('xml:space', 'preserve');
-    tNode.textContent = heading.title;
-    runText.appendChild(tNode);
-    p.appendChild(runText);
+    // Tab 分隔符 + PAGE 域（页码）
+    const runTab = doc.createElement('w:r');
+    const tab = doc.createElement('w:tab');
+    runTab.appendChild(tab);
+    p.appendChild(runTab);
 
-    // 最后一个段落：end
-    if (i === selectedHeadings.length - 1) {
-      const runEnd = doc.createElement('w:r');
-      const fldCharEnd = doc.createElement('w:fldChar');
-      fldCharEnd.setAttribute('w:fldCharType', 'end');
-      runEnd.appendChild(fldCharEnd);
-      p.appendChild(runEnd);
-    }
+    // PAGE 域 begin
+    const runPageBegin = doc.createElement('w:r');
+    const pageFldBegin = doc.createElement('w:fldChar');
+    pageFldBegin.setAttribute('w:fldCharType', 'begin');
+    runPageBegin.appendChild(pageFldBegin);
+    p.appendChild(runPageBegin);
 
-    body.insertBefore(p, firstElementChild);
+    // PAGE 域指令
+    const runPageInstr = doc.createElement('w:r');
+    const pageInstrText = doc.createElement('w:instrText');
+    pageInstrText.setAttribute('xml:space', 'preserve');
+    pageInstrText.textContent = ' PAGE ';
+    runPageInstr.appendChild(pageInstrText);
+    p.appendChild(runPageInstr);
+
+    // PAGE 域 separate
+    const runPageSep = doc.createElement('w:r');
+    const pageFldSep = doc.createElement('w:fldChar');
+    pageFldSep.setAttribute('w:fldCharType', 'separate');
+    runPageSep.appendChild(pageFldSep);
+    p.appendChild(runPageSep);
+
+    // PAGE 域占位文本
+    const runPageText = doc.createElement('w:r');
+    const pageTNode = doc.createElement('w:t');
+    pageTNode.textContent = '1';
+    runPageText.appendChild(pageTNode);
+    p.appendChild(runPageText);
+
+    // PAGE 域 end
+    const runPageEnd = doc.createElement('w:r');
+    const pageFldEnd = doc.createElement('w:fldChar');
+    pageFldEnd.setAttribute('w:fldCharType', 'end');
+    runPageEnd.appendChild(pageFldEnd);
+    p.appendChild(runPageEnd);
+
+    entryParagraphs.push(p);
   }
+
+  if (entryParagraphs.length === 0) return;
+
+  // 第二步：按顺序插入到 body
+  let insertRef: Element | null = insertBeforeRef;
+  for (const p of entryParagraphs) {
+    body.insertBefore(p, insertRef);
+  }
+
+  // 第三步：在第一个条目段落的 pPr 之前插入 TOC 域 begin + instrText + separate
+  const firstP = entryParagraphs[0];
+  const pPr = firstP.getElementsByTagName('w:pPr')[0];
+
+  const runBegin = doc.createElement('w:r');
+  const fldCharBegin = doc.createElement('w:fldChar');
+  fldCharBegin.setAttribute('w:fldCharType', 'begin');
+  runBegin.appendChild(fldCharBegin);
+
+  const runInstr = doc.createElement('w:r');
+  const instrText = doc.createElement('w:instrText');
+  instrText.setAttribute('xml:space', 'preserve');
+  instrText.textContent = ` TOC \\o "1-${maxLevel}" \\h \\z \\u `;
+  runInstr.appendChild(instrText);
+
+  const runSep = doc.createElement('w:r');
+  const fldCharSep = doc.createElement('w:fldChar');
+  fldCharSep.setAttribute('w:fldCharType', 'separate');
+  runSep.appendChild(fldCharSep);
+
+  // 逆序 insertBefore：每个新元素插在 pPr 之前，最终顺序为 begin → instr → sep → pPr
+  firstP.insertBefore(runSep, pPr);
+  firstP.insertBefore(runInstr, runSep);
+  firstP.insertBefore(runBegin, runInstr);
+
+  // 第四步：在最后一个条目段落末尾追加 TOC 域 end
+  const lastP = entryParagraphs[entryParagraphs.length - 1];
+  const runEnd = doc.createElement('w:r');
+  const fldCharEnd = doc.createElement('w:fldChar');
+  fldCharEnd.setAttribute('w:fldCharType', 'end');
+  runEnd.appendChild(fldCharEnd);
+  lastP.appendChild(runEnd);
 };
 
 /**

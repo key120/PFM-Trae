@@ -1,6 +1,6 @@
 import { supabase } from '../lib/supabase';
 import { decryptDocumentChunkedViaWorker } from './documentDecryptionWorker';
-import { getCachedEncryptedBlob, cacheEncryptedBlob } from './documentBlobCache';
+import { getCachedEncryptedBlob, cacheEncryptedBlob, invalidateAllCachedBlobsForDocument } from './documentBlobCache';
 import { encryptDocumentChunkedViaWorker } from './documentEncryptionWorker';
 import {
   generateDocumentKey,
@@ -521,6 +521,22 @@ export async function downloadFromR2(
   throw lastError;
 }
 
+/**
+ * 调用 Edge Function 在服务端删除文档所有版本的 R2 对象。
+ * 返回成功删除的 R2 对象数量。
+ */
+export async function deleteFromR2(documentId: string): Promise<number> {
+  const { data, error } = await supabase.functions.invoke('r2-sign-delete', {
+    body: { documentId },
+  });
+
+  if (error) {
+    throw error;
+  }
+
+  return (data?.deletedCount as number) ?? 0;
+}
+
 // ─────────────────────────────────────────────────────────────────────────────
 
 export async function loadPersonalDocument(
@@ -877,6 +893,43 @@ export async function unshareDocument(
       .eq('document_id', documentId)
       .eq('team_id', teamId);
   }
+}
+
+// ─── 删除文档 ────────────────────────────────────────────────────────────────
+
+export async function deleteDocument(
+  documentId: string,
+  userId: string,
+): Promise<void> {
+  const { data: doc, error: fetchError } = await supabase
+    .from('documents')
+    .select('owner_id')
+    .eq('id', documentId)
+    .single();
+
+  if (fetchError || !doc) {
+    throw new Error('文档不存在');
+  }
+
+  if (doc.owner_id !== userId) {
+    throw new Error('无权删除此文档');
+  }
+
+  // 先清理 R2 文件（所有版本）
+  await deleteFromR2(documentId);
+
+  // 再删除 Supabase 数据库行（CASCADE 清理 document_versions / document_keys / document_shares）
+  const { error: deleteError } = await supabase
+    .from('documents')
+    .delete()
+    .eq('id', documentId)
+    .eq('owner_id', userId);
+
+  if (deleteError) {
+    throw new Error(`删除失败：${deleteError.message}`);
+  }
+
+  await invalidateAllCachedBlobsForDocument(documentId);
 }
 
 // ─── 共享文档列表（被共享方视角） ─────────────────────────────────────────────────

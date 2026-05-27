@@ -1,0 +1,4 @@
+/* 删除确认弹窗上移 20px */
+.delete-confirm-modal.ant-modal {
+  margin-top: -20px !important;
+}
